@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
-import { randomBytes, pbkdf2Sync } from 'node:crypto';
+import { randomBytes, pbkdf2Sync, timingSafeEqual } from 'node:crypto';
 import { resolve } from 'node:path';
 
 const required=['CLOUDFLARE_API_TOKEN','CLOUDFLARE_ACCOUNT_ID','ADMIN_PASSWORD'];
@@ -50,7 +50,7 @@ async function verify(url){
  for(let attempt=0;attempt<6;attempt++){
   try{
    const response=await fetch(url+'/api/health',{signal:AbortSignal.timeout(20000)}),health=await response.json();
-   if(response.ok&&health.ready&&health.account_management){
+   if(response.ok&&health.ready&&health.account_management&&health.login_attempt_limit===false){
     // Passwords and login IDs can now change in the site. Verify storage through
     // the existing deployment credential without resetting any user credentials.
     const query=await cf('/d1/database/'+config.d1_databases[0].database_id+'/query','POST',{sql:"SELECT (SELECT count(*) FROM users WHERE is_admin=1 AND active=1 AND length(password_hash)>0) administrator_count,(SELECT count(*) FROM documents WHERE document_type NOT IN ('지침','매뉴얼','가이드라인','기타')) invalid_document_types,(SELECT count(*) FROM pragma_table_info('work_categories') WHERE name='parent_id') legacy_category_columns,(SELECT count(*) FROM pragma_table_info('work_categories') WHERE name='sort_order') category_order_columns,(SELECT count(*) FROM user_sessions s LEFT JOIN users u ON u.id=s.user_id WHERE u.id IS NULL) invalid_sessions"});
@@ -67,6 +67,25 @@ async function verify(url){
  }
  throw new Error('배포 후 계정·데이터베이스·화면 파일 검사를 통과하지 못했습니다. Cloudflare 배포 상태를 확인해 주세요.');
 }
+async function diagnoseAdministrator(url){
+ // Inspect credentials only in this secret-enabled process. Never print a
+ // password, derived hash, salt, session token, or complete account response.
+ const query=await cf('/d1/database/'+config.d1_databases[0].database_id+'/query','POST',{sql:'SELECT id,login_id,password_hash,active,last_login_at,created_at,updated_at FROM users WHERE is_admin=1'});
+ const administrator=query?.[0]?.results?.[0];if(!administrator)throw new Error('관리자 계정이 없습니다.');
+ const parts=administrator.password_hash.split('$'),validFormat=parts.length===4&&parts[0]==='pbkdf2'&&parts[1]==='100000'&&!!parts[2]&&/^[a-f0-9]{64}$/i.test(parts[3]);
+ const expected=validFormat?Buffer.from(parts[3],'hex'):null,actual=validFormat?pbkdf2Sync(password,parts[2],100000,32,'sha256'):null;
+ const matches=validFormat&&timingSafeEqual(expected,actual);
+ console.log('관리자 로그인 진단: '+JSON.stringify({default_id:administrator.login_id==='admin',active:administrator.active===1,valid_hash:validFormat,matches_deployment_password:matches,never_logged_in:!administrator.last_login_at,account_unchanged:administrator.created_at===administrator.updated_at}));
+ if(!matches){console.log('관리자 저장 비밀번호와 배포 초기 비밀번호가 다릅니다. 기존 계정 비밀번호를 자동으로 덮어쓰지 않습니다.');return;}
+ const login=await fetch(url+'/api/login',{method:'POST',headers:{Origin:url,'Content-Type':'application/json'},body:JSON.stringify({username:administrator.login_id,password}),signal:AbortSignal.timeout(20000)});
+ if(!login.ok)throw new Error('운영 관리자 로그인 검사 실패 (HTTP '+login.status+')');
+ const session=login.headers.get('Set-Cookie')?.split(';')[0];if(!session)throw new Error('운영 로그인 세션이 발급되지 않았습니다.');
+ try{
+  const response=await fetch(url+'/api/me',{headers:{Cookie:session},signal:AbortSignal.timeout(20000)}),body=await response.json();
+  if(!response.ok||!body.user?.is_admin||body.user.id!==administrator.id)throw new Error('운영 관리자 세션 검사 실패');
+ }finally{await fetch(url+'/api/logout',{method:'POST',headers:{Origin:url,Cookie:session},signal:AbortSignal.timeout(20000)});}
+ console.log('운영 관리자 비밀번호·로그인·세션 검사 통과');
+}
 try{
  await ensureDatabase();await ensureBucket();
  writeFileSync('wrangler.jsonc',JSON.stringify(config,null,2)+'\n');
@@ -79,7 +98,7 @@ try{
  output=run(['deploy']);
  const match=[...output.matchAll(/https:\/\/[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev/gi)].find(m=>new URL(m[0]).hostname.startsWith(config.name+'.'));
  if(!match)throw new Error('배포 주소를 확인하지 못했습니다. 위 Wrangler 배포 결과를 확인해 주세요.');
- const url=match[0];await verify(url);
+ const url=match[0];await verify(url);await diagnoseAdministrator(url);
  if(process.env.GITHUB_OUTPUT)appendFileSync(process.env.GITHUB_OUTPUT,'url='+url+'\n');
  if(process.env.GITHUB_STEP_SUMMARY)appendFileSync(process.env.GITHUB_STEP_SUMMARY,'## 문서관리 배포 완료\n\n[사이트 접속]('+url+')\n\n- 본인 Cloudflare Workers·D1·R2 사용\n- 계정·문서종류·업무구분 데이터 구조와 최신 화면 파일 검사 통과\n- 최초 관리자 아이디: `admin`\n- 최초 비밀번호: GitHub Secret `ADMIN_PASSWORD` 값. 이후 사이트에서 변경한 ID와 비밀번호는 유지됩니다.\n');
  console.log('배포 및 계정·문서 저장소 확인 완료: '+url);

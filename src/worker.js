@@ -72,14 +72,12 @@ async function login(request, env) {
   if (!configReady(env)) fail(503,'사이트 설정이 완료되지 않았습니다. 관리자에게 문의해 주세요.');
   await ensureAdministrator(env);
   const body = await readJSON(request);
-  const ipHash = await digest(request.headers.get('CF-Connecting-IP') || 'local');
-  const prior = await first(env,'SELECT * FROM login_attempts WHERE ip_hash=?',ipHash);
-  if (prior?.failures>=5 && prior.blocked_until>Date.now()) fail(429,'로그인 시도가 많습니다. 15분 후 다시 시도해 주세요.');
+  // Login-attempt lockouts stay disabled until the owner asks to restore them.
+  // Always check submitted credentials, including IPs with legacy block records.
   const name = typeof body.username==='string'?body.username.normalize('NFC').trim().slice(0,100):'';
   const password = typeof body.password==='string'?body.password:'';
   const user=await first(env,'SELECT * FROM users WHERE login_id=? COLLATE NOCASE',name);
   if (password.length>256 || !user || !user.active || !await passwordMatches(password,user.password_hash)) {
-    await stmt(env,`INSERT INTO login_attempts VALUES(?,1,?) ON CONFLICT(ip_hash) DO UPDATE SET failures=CASE WHEN blocked_until<? THEN 1 ELSE failures+1 END, blocked_until=CASE WHEN blocked_until<? THEN excluded.blocked_until ELSE blocked_until END`,ipHash,Date.now()+900000,Date.now(),Date.now()).run();
     fail(401,'아이디 또는 비밀번호가 올바르지 않습니다.');
   }
   const token = [...crypto.getRandomValues(new Uint8Array(32))].map(b=>b.toString(16).padStart(2,'0')).join('');
@@ -87,7 +85,7 @@ async function login(request, env) {
   const result=await env.DB.batch([
     stmt(env,'UPDATE users SET last_login_at=?,updated_at=?,token=? WHERE id=? AND active=1 AND password_hash=? AND token=?',time,time,userToken,user.id,user.password_hash,user.token),
     stmt(env,'INSERT INTO user_sessions SELECT ?,?,id FROM users WHERE id=? AND active=1 AND token=?',await digest(token),Date.now()+43200000,user.id,userToken),
-    stmt(env,'DELETE FROM login_attempts WHERE ip_hash=?',ipHash),stmt(env,'DELETE FROM user_sessions WHERE expires_at<?',Date.now())
+    stmt(env,'DELETE FROM user_sessions WHERE expires_at<?',Date.now())
   ]);
   if(!result[0].meta.changes)fail(401,'계정정보가 변경되었습니다. 다시 로그인해 주세요.');
   return json({ok:true,user:publicUser({...user,last_login_at:time,token:userToken})},200,{'Set-Cookie':sessionCookie(request,token,43200)});
@@ -352,7 +350,7 @@ async function route(request,env,ctx) {
   if(!['GET','HEAD'].includes(method)&&request.headers.get('Origin')!==url.origin)fail(403,'같은 사이트에서만 변경할 수 있습니다. 페이지를 새로고침해 주세요.');
   if(path==='/api/session'&&method==='GET'){const user=await authorized(request,env);return json({authenticated:!!user,user,configured:configReady(env),username:env.ADMIN_USER||'admin'});}
   if(path==='/api/login'&&method==='POST')return login(request,env);
-  if(path==='/api/health'&&method==='GET'){if(configReady(env))await ensureAdministrator(env);return json({ready:configReady(env)&&!!await first(env,'SELECT id FROM users WHERE is_admin=1 AND active=1'),account_management:true});}
+  if(path==='/api/health'&&method==='GET'){if(configReady(env))await ensureAdministrator(env);return json({ready:configReady(env)&&!!await first(env,'SELECT id FROM users WHERE is_admin=1 AND active=1'),account_management:true,login_attempt_limit:false});}
   const user=await authorized(request,env);
   if(!user)fail(401,'로그인이 필요합니다. 다시 로그인해 주세요.');
   if(path==='/api/logout'&&method==='POST'){await stmt(env,'DELETE FROM user_sessions WHERE token_hash=?',await digest(cookieValue(request))).run();return json({ok:true},200,{'Set-Cookie':sessionCookie(request,'',0)});}

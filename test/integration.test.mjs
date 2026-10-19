@@ -416,11 +416,18 @@ test('문서관리: 고정 구분·1:1 연결·기관별 비교 표 통합 검�
   assert.equal(ok(await changeAccount(await account(root.id),{login_id:'admin',name:'관리자',password})).reauthenticate,true);
   cookie=(await signIn('admin',password)).cookie;
  });
- await t.test('로그아웃·첨부 접근 제한·로그인 실패 제한',async()=>{
+ await t.test('로그아웃·첨부 접근 제한·기존 로그인 차단 해제 및 반복 실패 뒤 즉시 로그인',async()=>{
   const file=(await document(assocA.document_id)).revisions.at(-1).attachments[0];
   ok(await req('/api/logout',{method:'POST'}));cookie='';assert.equal((await req('/api/documents')).status,401);assert.equal((await req('/api/files/'+file.id)).status,401);
-  for(let i=0;i<5;i++)assert.equal((await req('/api/login',{method:'POST',data:{username:'admin',password:'wrong'},headers:{'CF-Connecting-IP':'198.51.100.9'}})).status,401);
-  assert.equal((await req('/api/login',{method:'POST',data:{username:'admin',password},headers:{'CF-Connecting-IP':'198.51.100.9'}})).status,429);
+  const ip='198.51.100.9',ipHash=createHash('sha256').update(ip).digest('hex');
+  await db.prepare('INSERT INTO login_attempts VALUES(?,99,?)').bind(ipHash,Date.now()+900000).run();
+  // Even pre-existing block records cannot prevent checking a correct password.
+  let session=await signIn('admin',password,ip);assert.equal(session.user.is_admin,true);
+  await migrate('0005_clear_login_lockouts.sql');assert.equal((await db.prepare('SELECT count(*) n FROM login_attempts').first()).n,0);
+  for(let i=0;i<12;i++)assert.equal((await req('/api/login',{method:'POST',data:{username:'admin',password:'wrong'},headers:{'CF-Connecting-IP':ip}})).status,401);
+  session=await signIn('admin',password,ip);assert.equal(ok(await as(session.cookie,'/api/session')).authenticated,true);
+  assert.equal(ok(await req('/api/health')).login_attempt_limit,false);
+  assert.equal((await db.prepare('SELECT count(*) n FROM login_attempts').first()).n,0);
  });
 });
 
