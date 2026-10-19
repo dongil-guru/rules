@@ -58,6 +58,15 @@ async function verify(url){
     const b=await fetch(url+'/api/bootstrap',{headers:{Cookie:cookie},signal:AbortSignal.timeout(20000)});
     if(!b.ok)throw new Error('문서 저장소 조회 검사 실패');
     const data=await b.json();if(!Array.isArray(data.organizations)||!Array.isArray(data.categories))throw new Error('분류 조회 결과 확인 필요');
+    if(data.organizations.length!==2||!['kwwa','upper'].every(id=>data.organizations.some(side=>side.id===id)))throw new Error('고정 기관 구분 전환 확인 필요');
+    const listResponse=await fetch(url+'/api/documents',{headers:{Cookie:cookie},signal:AbortSignal.timeout(20000)});
+    if(!listResponse.ok)throw new Error('비교 표 조회 검사 실패');
+    const list=await listResponse.json();if(!Array.isArray(list.rows))throw new Error('비교 표 형식 확인 필요');
+    const seen=new Set();
+    for(const row of list.rows){for(const side of ['kwwa','upper']){const doc=row[side];if(!doc)continue;if(doc.organization_id!==side||seen.has(doc.id))throw new Error('기관 구분 또는 중복 연결 검사 실패');seen.add(doc.id);}}
+    const document=list.rows.flatMap(row=>[row.kwwa,row.upper]).find(Boolean);
+    if(document){const response=await fetch(url+'/api/documents/'+encodeURIComponent(document.id),{headers:{Cookie:cookie},signal:AbortSignal.timeout(20000)});if(!response.ok)throw new Error('제·개정 상세 조회 검사 실패');const detail=await response.json();if(!detail.columns||!Array.isArray(detail.revisions))throw new Error('기관별 상세 정보 확인 필요');}
+    const frontend=await fetch(url+'/app.js',{signal:AbortSignal.timeout(20000)});if(!frontend.ok||!(await frontend.text()).includes('paired-document-table'))throw new Error('비교 표 화면 배포 확인 필요');
     await fetch(url+'/api/logout',{method:'POST',headers:{Origin:url,Cookie:cookie},signal:AbortSignal.timeout(20000)});
     return;
    }
@@ -80,6 +89,6 @@ try{
  if(!match)throw new Error('배포 주소를 확인하지 못했습니다. 위 Wrangler 배포 결과를 확인해 주세요.');
  const url=match[0];await verify(url);
  if(process.env.GITHUB_OUTPUT)appendFileSync(process.env.GITHUB_OUTPUT,'url='+url+'\n');
- if(process.env.GITHUB_STEP_SUMMARY)appendFileSync(process.env.GITHUB_STEP_SUMMARY,'## 문서이음 배포 완료\n\n[사이트 접속]('+url+')\n\n- 본인 Cloudflare Workers·D1·R2 사용\n- 로그인·분류 조회 및 데이터베이스 검사 통과\n- 관리자 아이디: `admin`\n- 비밀번호: GitHub Secret `ADMIN_PASSWORD`에 본인이 등록한 값\n');
+ if(process.env.GITHUB_STEP_SUMMARY)appendFileSync(process.env.GITHUB_STEP_SUMMARY,'## 문서관리 배포 완료\n\n[사이트 접속]('+url+')\n\n- 본인 Cloudflare Workers·D1·R2 사용\n- 로그인·고정 기관 구분·비교 표·기관별 상세 및 데이터베이스 검사 통과\n- 관리자 아이디: `admin`\n- 비밀번호: GitHub Secret `ADMIN_PASSWORD`에 본인이 등록한 값\n');
  console.log('배포 및 로그인·저장소 확인 완료: '+url);
 }catch(error){console.error(error.message);process.exitCode=1;}

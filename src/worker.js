@@ -111,56 +111,64 @@ function searchClause(url, alias='s') {
   return {sql:clauses.length?clauses.join(' AND '):'1=1',args};
 }
 async function listDocuments(url,env) {
-  const where=[],args=[],search=searchClause(url);
-  const org=url.searchParams.get('organization'),cat=url.searchParams.get('category');
-  if(org){where.push('d.organization_id=?');args.push(org);}
-  if(cat){where.push('(d.category_id=? OR c.parent_id=?)');args.push(cat,cat);}
-  where.push(`EXISTS(SELECT 1 FROM revisions s WHERE s.document_id=d.id AND ${search.sql})`);args.push(...search.args);
-  const list=await rows(env,`SELECT d.id,d.organization_id,d.category_id,o.name organization_name,c.name category_name,c.parent_id,
-    r.id revision_id,r.title,r.revision_date,r.summary,r.manager,r.approval_no,r.sequence,r.updated_at,
-    (SELECT count(*) FROM revisions v WHERE v.document_id=d.id) revision_count,
-    (SELECT count(*) FROM attachments a WHERE a.revision_id=r.id) attachment_count,
-    (SELECT count(*) FROM relations l WHERE l.source_id=r.id) relation_count,
-    CASE WHEN ${search.sql.replaceAll('s.','r.')} THEN 0 ELSE 1 END history_match
-    FROM documents d JOIN organizations o ON o.id=d.organization_id JOIN work_categories c ON c.id=d.category_id
-    JOIN revisions r ON r.document_id=d.id AND r.sequence=(SELECT MAX(sequence) FROM revisions WHERE document_id=d.id)
-    WHERE ${where.join(' AND ')} ORDER BY r.revision_date DESC,r.updated_at DESC,d.id`,...search.args,...args);
-  return json({documents:list});
+  const search=searchClause(url),category=url.searchParams.get('category');
+  const filter=category?'AND (d.category_id=? OR c.parent_id=?)':'';
+  const result=await env.DB.batch([
+    stmt(env,`SELECT d.id FROM documents d JOIN work_categories c ON c.id=d.category_id WHERE EXISTS(SELECT 1 FROM revisions s WHERE s.document_id=d.id AND ${search.sql}) ${filter}`,...search.args,...(category?[category,category]:[])),
+    stmt(env,`SELECT d.id,d.organization_id,d.category_id,o.name organization_name,c.name category_name,c.parent_id,
+      CASE WHEN pc.id IS NULL THEN c.name ELSE pc.name||' › '||c.name END category_path,
+      r.id revision_id,r.title,r.revision_date,r.summary,r.manager,r.approval_no,r.sequence,r.updated_at,
+      (SELECT count(*) FROM revisions v WHERE v.document_id=d.id) revision_count,
+      (SELECT count(*) FROM attachments a WHERE a.revision_id=r.id) attachment_count,
+      CASE WHEN ${search.sql.replaceAll('s.','r.')} THEN 0 ELSE 1 END history_match,
+      p.kwwa_id,p.upper_id
+      FROM documents d JOIN organizations o ON o.id=d.organization_id JOIN work_categories c ON c.id=d.category_id
+      LEFT JOIN work_categories pc ON pc.id=c.parent_id
+      JOIN revisions r ON r.document_id=d.id AND r.sequence=(SELECT MAX(sequence) FROM revisions WHERE document_id=d.id)
+      LEFT JOIN document_pairs p ON p.kwwa_id=d.id OR p.upper_id=d.id
+      ORDER BY category_path,r.revision_date DESC,d.id`,...search.args)
+  ]);
+  const matches=new Set(result[0].results.map(d=>d.id)),all=new Map(result[1].results.map(d=>[d.id,{...d,search_match:matches.has(d.id),history_match:matches.has(d.id)?d.history_match:0}]));
+  const seen=new Set(),pairedRows=[];
+  for(const document of all.values()){
+    const key=document.kwwa_id||document.id;if(seen.has(key))continue;seen.add(key);
+    const kwwa=document.kwwa_id?all.get(document.kwwa_id):(document.organization_id==='kwwa'?document:null);
+    const upper=document.upper_id?all.get(document.upper_id):(document.organization_id==='upper'?document:null);
+    if(!matches.has(kwwa?.id)&&!matches.has(upper?.id))continue;
+    const anchor=kwwa||upper;pairedRows.push({category_id:anchor.category_id,category_path:anchor.category_path,kwwa:kwwa||null,upper:upper||null});
+  }
+  pairedRows.sort((a,b)=>a.category_path.localeCompare(b.category_path,'ko')||[b.kwwa?.revision_date||'',b.upper?.revision_date||''].sort().at(-1).localeCompare([a.kwwa?.revision_date||'',a.upper?.revision_date||''].sort().at(-1))||(a.kwwa?.title||a.upper.title).localeCompare(b.kwwa?.title||b.upper.title,'ko'));
+  return json({rows:pairedRows,documents:pairedRows.flatMap(row=>[row.kwwa,row.upper].filter(Boolean))});
 }
 async function detail(env,id) {
-  const document=await first(env,`SELECT d.*,o.name organization_name,c.name category_name,c.parent_id FROM documents d JOIN organizations o ON o.id=d.organization_id JOIN work_categories c ON c.id=d.category_id WHERE d.id=?`,id);
-  if(!document)fail(404,'문서를 찾을 수 없습니다. 삭제되었을 수 있습니다.');
-  const relatedIds=`SELECT DISTINCT t.document_id FROM relations l JOIN revisions s ON s.id=l.source_id JOIN revisions t ON t.id=l.target_id WHERE s.document_id=?`;
+  const partnerSql=`SELECT CASE WHEN kwwa_id=? THEN upper_id ELSE kwwa_id END FROM document_pairs WHERE kwwa_id=? OR upper_id=?`;
+  const scope=`SELECT ? UNION ${partnerSql}`,args=[id,id,id,id];
   const result=await env.DB.batch([
-    stmt(env,'SELECT * FROM revisions WHERE document_id=? ORDER BY sequence DESC',id),
-    stmt(env,`SELECT a.id,a.revision_id,a.name,a.size,a.mime,a.created_at FROM attachments a JOIN revisions r ON r.id=a.revision_id WHERE r.document_id=? ORDER BY a.created_at,a.name`,id),
-    stmt(env,`SELECT l.source_id,r.id,r.document_id,r.title,r.revision_date,r.sequence,d.organization_id,o.name organization_name FROM relations l JOIN revisions s ON s.id=l.source_id JOIN revisions r ON r.id=l.target_id JOIN documents d ON d.id=r.document_id JOIN organizations o ON o.id=d.organization_id WHERE s.document_id=? ORDER BY o.name,r.title,r.sequence DESC`,id),
-    stmt(env,`SELECT l.target_id,r.id,r.document_id,r.title,r.revision_date,r.sequence,o.name organization_name FROM relations l JOIN revisions t ON t.id=l.target_id JOIN revisions r ON r.id=l.source_id JOIN documents d ON d.id=r.document_id JOIN organizations o ON o.id=d.organization_id WHERE t.document_id=? ORDER BY o.name,r.title`,id),
-    stmt(env,`SELECT d.*,o.name organization_name,c.name category_name,c.parent_id FROM documents d JOIN organizations o ON o.id=d.organization_id JOIN work_categories c ON c.id=d.category_id WHERE d.id IN (${relatedIds}) ORDER BY o.name,d.created_at,d.id`,id),
-    stmt(env,`SELECT r.* FROM revisions r WHERE r.document_id IN (${relatedIds}) ORDER BY r.document_id,r.sequence DESC`,id),
-    stmt(env,`SELECT a.id,a.revision_id,a.name,a.size,a.mime,a.created_at FROM attachments a JOIN revisions r ON r.id=a.revision_id WHERE r.document_id IN (${relatedIds}) ORDER BY a.created_at,a.name`,id),
-    stmt(env,`SELECT l.source_id,r.id,r.document_id,r.title,r.revision_date,r.sequence,o.name organization_name FROM relations l JOIN revisions s ON s.id=l.source_id JOIN revisions r ON r.id=l.target_id JOIN documents d ON d.id=r.document_id JOIN organizations o ON o.id=d.organization_id WHERE s.document_id IN (${relatedIds}) ORDER BY o.name,r.title,r.sequence DESC`,id),
-    stmt(env,`SELECT l.target_id,r.id,r.document_id,r.title,r.revision_date,r.sequence,o.name organization_name FROM relations l JOIN revisions t ON t.id=l.target_id JOIN revisions r ON r.id=l.source_id JOIN documents d ON d.id=r.document_id JOIN organizations o ON o.id=d.organization_id WHERE t.document_id IN (${relatedIds}) ORDER BY o.name,r.title`,id)
+    stmt(env,`SELECT d.*,o.name organization_name,c.name category_name,c.parent_id FROM documents d JOIN organizations o ON o.id=d.organization_id JOIN work_categories c ON c.id=d.category_id WHERE d.id IN (${scope})`,...args),
+    stmt(env,`SELECT * FROM revisions WHERE document_id IN (${scope}) ORDER BY document_id,sequence DESC`,...args),
+    stmt(env,`SELECT a.id,a.revision_id,a.name,a.size,a.mime,a.created_at FROM attachments a JOIN revisions r ON r.id=a.revision_id WHERE r.document_id IN (${scope}) ORDER BY a.created_at,a.name`,...args)
   ]);
-  const filesByRevision=new Map(),revisionsByDocument=new Map(),linkedByDocument=new Map(),linksByRevision=new Map(),backlinksByRevision=new Map();
-  for(const file of result[6].results){if(!filesByRevision.has(file.revision_id))filesByRevision.set(file.revision_id,[]);filesByRevision.get(file.revision_id).push(file);}
-  for(const link of result[7].results){if(!linksByRevision.has(link.source_id))linksByRevision.set(link.source_id,[]);linksByRevision.get(link.source_id).push(link);}
-  for(const link of result[8].results){if(!backlinksByRevision.has(link.target_id))backlinksByRevision.set(link.target_id,[]);backlinksByRevision.get(link.target_id).push(link);}
-  for(const revision of result[5].results){if(!revisionsByDocument.has(revision.document_id))revisionsByDocument.set(revision.document_id,[]);revisionsByDocument.get(revision.document_id).push({...revision,attachments:filesByRevision.get(revision.id)||[],relations:linksByRevision.get(revision.id)||[],backlinks:backlinksByRevision.get(revision.id)||[]});}
-  for(const link of result[2].results){if(!linkedByDocument.has(link.document_id))linkedByDocument.set(link.document_id,new Set());linkedByDocument.get(link.document_id).add(link.id);}
-  const related_documents=result[4].results.map(document=>({document,revisions:revisionsByDocument.get(document.id)||[],linked_revision_ids:[...(linkedByDocument.get(document.id)||[])]}));
-  return json({document,revisions:result[0].results.map(r=>({...r,attachments:result[1].results.filter(a=>a.revision_id===r.id),relations:result[2].results.filter(a=>a.source_id===r.id),backlinks:result[3].results.filter(a=>a.target_id===r.id)})),related_documents});
+  if(!result[0].results.some(d=>d.id===id))fail(404,'문서를 찾을 수 없습니다. 삭제되었을 수 있습니다.');
+  const files=new Map(),revisions=new Map();
+  for(const file of result[2].results){if(!files.has(file.revision_id))files.set(file.revision_id,[]);files.get(file.revision_id).push(file);}
+  for(const revision of result[1].results){if(!revisions.has(revision.document_id))revisions.set(revision.document_id,[]);revisions.get(revision.document_id).push({...revision,attachments:files.get(revision.id)||[]});}
+  const bundles=result[0].results.map(document=>({document,revisions:revisions.get(document.id)||[],related_document_id:result[0].results.find(d=>d.id!==document.id)?.id||null}));
+  const current=bundles.find(b=>b.document.id===id),related=bundles.filter(b=>b.document.id!==id);
+  return json({...current,related_documents:related,columns:{kwwa:bundles.find(b=>b.document.organization_id==='kwwa')||null,upper:bundles.find(b=>b.document.organization_id==='upper')||null}});
 }
 async function references(url,env) {
-  const exclude=url.searchParams.get('exclude_org');if(!exclude)fail(400,'문서의 기관을 먼저 선택해 주세요.');
+  const side=url.searchParams.get('exclude_org'),category=url.searchParams.get('category'),current=url.searchParams.get('document')||'';
+  if(!['kwwa','upper'].includes(side))fail(400,'기관 구분을 먼저 선택해 주세요.');
+  if(!category)fail(400,'업무구분을 먼저 선택해 주세요.');
   const q=(url.searchParams.get('q')||'').normalize('NFC').trim().slice(0,100);
-  const org=url.searchParams.get('organization');
-  const list=await rows(env,`SELECT r.id,r.document_id,r.title,r.revision_date,r.sequence,o.name organization_name,d.organization_id,
-    CASE WHEN r.sequence=(SELECT MAX(sequence) FROM revisions WHERE document_id=d.id) THEN 1 ELSE 0 END is_latest
-    FROM revisions r JOIN documents d ON d.id=r.document_id JOIN organizations o ON o.id=d.organization_id
-    WHERE d.organization_id<>? AND (instr(lower(r.title),lower(?))>0 OR instr(lower(o.name),lower(?))>0)
-    ${org?'AND d.organization_id=?':''} ORDER BY o.name,r.title COLLATE NOCASE,r.sequence DESC LIMIT 101`,exclude,q,q,...(org?[org]:[]));
-  return json({revisions:list.slice(0,100),has_more:list.length>100});
+  const list=await rows(env,`SELECT d.id,d.organization_id,d.category_id,o.name organization_name,r.id revision_id,r.title,r.revision_date,r.sequence
+    FROM documents d JOIN organizations o ON o.id=d.organization_id JOIN revisions r ON r.document_id=d.id
+    WHERE d.organization_id<>? AND d.category_id=? AND d.id<>?
+      AND r.sequence=(SELECT MAX(sequence) FROM revisions WHERE document_id=d.id)
+      AND instr(lower(r.title),lower(?))>0
+      AND NOT EXISTS(SELECT 1 FROM document_pairs p WHERE (p.kwwa_id=d.id OR p.upper_id=d.id) AND p.kwwa_id<>? AND p.upper_id<>?)
+    ORDER BY r.title COLLATE NOCASE,r.revision_date DESC LIMIT 101`,side,category,current,q,current,current);
+  return json({documents:list.slice(0,100),has_more:list.length>100});
 }
 async function parsedRevision(request) {
   if(!request.headers.get('Content-Type')?.startsWith('multipart/form-data'))fail(415,'파일 전송 형식이 올바르지 않습니다.');
@@ -170,51 +178,56 @@ async function parsedRevision(request) {
   if(!data||typeof data!=='object')fail(400,'입력값을 확인해 주세요.');
   const fields={title:clean(data.title,'문서명',50,true),revision_date:validDate(data.revision_date),summary:clean(data.summary,'주요내용',300),manager:clean(data.manager,'담당자',100,true),approval_no:clean(data.approval_no,'참조 결재번호',10)};
   const organization=clean(data.organization_id,'기관',80,true),category=clean(data.category_id,'업무구분',80,true);
-  const keep=ids(data.keep_attachments||[],'첨부파일',20),relations=ids(data.relations||[],'연관문서');
+  if(data.relations!==undefined)fail(400,'문서 연결 방식이 변경되었습니다. 화면을 새로고침한 후 다시 저장해 주세요.');
+  const keep=ids(data.keep_attachments||[],'첨부파일',20),related=clean(data.related_document_id,'연관문서',80);
+  const hasRelated=Object.prototype.hasOwnProperty.call(data,'related_document_id');
   const files=form.getAll('files').filter(x=>typeof x!=='string'&&x.name);
   if(files.length+keep.length>20)fail(400,'첨부파일은 이력당 20개까지 등록할 수 있습니다.');
   if(files.some(f=>f.size>MAX_FILE))fail(413,'파일 한 개의 크기는 20MB 이하여야 합니다.');
   if(files.reduce((s,f)=>s+f.size,0)>MAX_TOTAL)fail(413,'한 번에 첨부하는 파일은 총 40MB 이하여야 합니다.');
-  return {data,fields,organization,category,keep,relations,files};
+  return {data,fields,organization,category,keep,related,hasRelated,files};
 }
 async function cleanup(env) {
   const garbage=await rows(env,'SELECT storage_key FROM file_garbage LIMIT 50');
   for(const item of garbage){try{await env.FILES.delete(item.storage_key);await stmt(env,'DELETE FROM file_garbage WHERE storage_key=?',item.storage_key).run();}catch{ /* Retry at the next mutation. */ }}
 }
 async function saveRevision(request,env,ctx,documentId,revisionId) {
-  const input=await parsedRevision(request),{data,fields,organization,category,keep,relations,files}=input;
+  const {data,fields,organization,category,keep,related,hasRelated,files}=await parsedRevision(request);
   let original=null;
   if(revisionId){original=await first(env,'SELECT * FROM revisions WHERE id=?',revisionId);if(!original)fail(404,'수정할 이력을 찾을 수 없습니다.');documentId=original.document_id;if(data.token!==original.token)fail(409,'다른 창에서 변경된 이력입니다. 새로고침 후 다시 수정해 주세요.');}
   if(documentId&&!await first(env,'SELECT 1 FROM documents WHERE id=?',documentId))fail(404,'문서를 찾을 수 없습니다.');
-  if(!await first(env,'SELECT 1 FROM organizations WHERE id=?',organization))fail(400,'기관을 선택해 주세요.');
+  if(!['kwwa','upper'].includes(organization))fail(400,'기관 구분은 한국상하수도협회 또는 상위기관을 선택해 주세요.');
   if(!await first(env,'SELECT 1 FROM work_categories WHERE id=?',category))fail(400,'업무구분을 선택해 주세요.');
   if(keep.length&&!revisionId)fail(400,'이전 이력의 첨부파일은 원본 이력에서 확인해 주세요. 새 이력에는 파일을 첨부해 주세요.');
   if(keep.length){const owned=await rows(env,'SELECT id FROM attachments WHERE revision_id=?',revisionId);if(keep.some(id=>!owned.some(a=>a.id===id)))fail(400,'기존 첨부파일을 확인해 주세요.');}
-  if(relations.length){const found=await rows(env,`SELECT r.id,d.organization_id FROM revisions r JOIN documents d ON d.id=r.document_id WHERE r.id IN (${relations.map(()=>'?').join(',')})`,...relations);if(found.length!==relations.length)fail(400,'삭제되었거나 존재하지 않는 연관문서가 있습니다.');if(found.some(x=>x.organization_id===organization))fail(400,'연관문서는 다른 기관의 문서만 선택할 수 있습니다.');}
   const docId=documentId||uid(),revId=revisionId||uid(),token=uid(),time=now(),uploaded=[];
+  const pair=documentId?await first(env,'SELECT * FROM document_pairs WHERE kwwa_id=? OR upper_id=?',docId,docId):null;
+  const previous=pair?(pair.kwwa_id===docId?pair.upper_id:pair.kwwa_id):'';
+  const target=hasRelated?related:previous;
+  if(target){
+    if(target===docId)fail(400,'현재 문서를 연관문서로 선택할 수 없습니다.');
+    const other=await first(env,'SELECT * FROM documents WHERE id=?',target);
+    if(!other)fail(400,'삭제되었거나 존재하지 않는 연관문서입니다.');
+    if(other.organization_id===organization)fail(400,'연관문서는 서로 다른 기관 구분의 문서끼리 연결해 주세요.');
+    if(other.category_id!==category)fail(400,'연관문서와 같은 업무구분을 선택해 주세요.');
+    if(await first(env,'SELECT 1 FROM document_pairs WHERE (kwwa_id=? OR upper_id=?) AND kwwa_id<>? AND upper_id<>?',target,target,docId,docId))fail(409,'이미 다른 문서와 연결된 문서입니다. 다른 연관문서를 선택해 주세요.');
+  }
   try {
     for(const file of files){const id=uid(),key=`attachments/${docId}/${revId}/${id}`,name=clean(file.name,'파일명',255,true),mime=clean(file.type,'파일 형식',150)||'application/octet-stream';await env.FILES.put(key,file.stream(),{httpMetadata:{contentType:'application/octet-stream'}});uploaded.push({id,key,name,size:file.size,mime});}
-    const commands=[];
-    const f=[fields.title,fields.revision_date,fields.summary,fields.manager,fields.approval_no];
-    const guard=revisionId?'EXISTS(SELECT 1 FROM revisions WHERE id=? AND token=?)':'1=1';
-    const guardArgs=revisionId?[revId,token]:[];
-    if(revisionId){
-      commands.push(stmt(env,'UPDATE revisions SET title=?,revision_date=?,summary=?,manager=?,approval_no=?,token=?,updated_at=? WHERE id=? AND token=?',...f,token,time,revId,data.token));
-      commands.push(stmt(env,`DELETE FROM relations WHERE source_id=? AND ${guard}`,revId,...guardArgs));
-      commands.push(stmt(env,`UPDATE documents SET organization_id=?,category_id=? WHERE id=? AND ${guard}`,organization,category,docId,...guardArgs));
-    }else {
-      if(!documentId)commands.push(stmt(env,'INSERT INTO documents VALUES(?,?,?,?)',docId,organization,category,time));
-      else commands.push(stmt(env,'UPDATE documents SET organization_id=?,category_id=? WHERE id=?',organization,category,docId));
-      commands.push(stmt(env,'INSERT INTO revisions (id,document_id,sequence,title,revision_date,summary,manager,approval_no,token,created_at,updated_at) SELECT ?,?,COALESCE(MAX(sequence),0)+1,?,?,?,?,?,?,?,? FROM revisions WHERE document_id=?',revId,docId,...f,token,time,time,docId));
-    }
-    for(const target of relations)commands.push(stmt(env,`INSERT INTO relations(source_id,target_id) SELECT ?,? WHERE ${guard}`,revId,target,...guardArgs));
+    const commands=[],f=[fields.title,fields.revision_date,fields.summary,fields.manager,fields.approval_no];
+    const guard=revisionId?'EXISTS(SELECT 1 FROM revisions WHERE id=? AND token=?)':'1=1',guardArgs=revisionId?[revId,token]:[];
+    if(revisionId)commands.push(stmt(env,'UPDATE revisions SET title=?,revision_date=?,summary=?,manager=?,approval_no=?,token=?,updated_at=? WHERE id=? AND token=?',...f,token,time,revId,data.token));
+    if(documentId)commands.push(stmt(env,`DELETE FROM document_pairs WHERE (kwwa_id=? OR upper_id=?) AND ${guard}`,docId,docId,...guardArgs));
+    if(!documentId)commands.push(stmt(env,'INSERT INTO documents VALUES(?,?,?,?)',docId,organization,category,time));
+    else commands.push(stmt(env,`UPDATE documents SET organization_id=?,category_id=? WHERE id=? AND ${guard}`,organization,category,docId,...guardArgs));
+    if(!revisionId)commands.push(stmt(env,'INSERT INTO revisions (id,document_id,sequence,title,revision_date,summary,manager,approval_no,token,created_at,updated_at) SELECT ?,?,COALESCE(MAX(sequence),0)+1,?,?,?,?,?,?,?,? FROM revisions WHERE document_id=?',revId,docId,...f,token,time,time,docId));
+    if(target)commands.push(stmt(env,`INSERT INTO document_pairs(kwwa_id,upper_id,created_at) SELECT ?,?,? WHERE ${guard}`,organization==='kwwa'?docId:target,organization==='upper'?docId:target,time,...guardArgs));
     if(revisionId)commands.push(stmt(env,`DELETE FROM attachments WHERE revision_id=? ${keep.length?`AND id NOT IN (${keep.map(()=>'?').join(',')})`:''} AND ${guard}`,revId,...keep,...guardArgs));
     for(const file of uploaded)commands.push(stmt(env,`INSERT INTO attachments (id,revision_id,storage_key,name,size,mime,created_at) SELECT ?,?,?,?,?,?,? WHERE ${guard}`,file.id,revId,file.key,file.name,file.size,file.mime,time,...guardArgs));
     const result=await env.DB.batch(commands);
     if(revisionId&&result[0].meta.changes===0)fail(409,'다른 창에서 변경된 이력입니다. 새로고침 후 다시 수정해 주세요.');
-    ctx.waitUntil(cleanup(env));
-    return json({document_id:docId,revision_id:revId},revisionId?200:201);
-  }catch(e){for(const f of uploaded){try{await env.FILES.delete(f.key);}catch{/* Do not obscure the original error. */}}throw e;}
+    ctx.waitUntil(cleanup(env));return json({document_id:docId,revision_id:revId},revisionId?200:201);
+  }catch(e){for(const file of uploaded){try{await env.FILES.delete(file.key);}catch{}}if(/UNIQUE constraint failed: document_pairs/.test(String(e)))fail(409,'이미 다른 문서와 연결된 문서입니다. 다른 연관문서를 선택해 주세요.');throw e;}
 }
 async function deleteRevision(request,env,ctx,id) {
   const body=await readJSON(request),rev=await first(env,'SELECT * FROM revisions WHERE id=?',id);
@@ -251,7 +264,7 @@ async function route(request,env,ctx) {
   if(path==='/api/logout'&&method==='POST'){await stmt(env,'DELETE FROM sessions WHERE token_hash=?',await digest(cookieValue(request))).run();return json({ok:true},200,{'Set-Cookie':sessionCookie(request,'',0)});}
   if(path==='/api/bootstrap'&&method==='GET')return bootstrap(env);
   const category=path.match(/^\/api\/(organizations|categories)(?:\/([\w-]+))?$/);
-  if(category&&['POST','PUT','DELETE'].includes(method)){if((method==='POST'&&category[2])||(method!=='POST'&&!category[2]))fail(405,'허용되지 않는 요청입니다.');return categoryMutation(request,env,category[1],category[2]);}
+  if(category&&['POST','PUT','DELETE'].includes(method)){if(category[1]==='organizations')fail(405,'기관 구분은 한국상하수도협회와 상위기관으로 고정되어 있습니다.');if((method==='POST'&&category[2])||(method!=='POST'&&!category[2]))fail(405,'허용되지 않는 요청입니다.');return categoryMutation(request,env,category[1],category[2]);}
   if(path==='/api/documents'&&method==='GET')return listDocuments(url,env);
   if(path==='/api/documents'&&method==='POST')return saveRevision(request,env,ctx);
   if(path==='/api/references'&&method==='GET')return references(url,env);
@@ -270,7 +283,7 @@ async function route(request,env,ctx) {
 export default {async fetch(request,env,ctx){
   let response;try{response=await route(request,env,ctx);}catch(e){
     const message=String(e.message||e);
-    const known=message.match(/(기관 변경으로 동일 기관의 참조가 발생합니다[^\n]*|연관문서는 다른 기관의 문서만 연결할 수 있습니다\.)/);
+    const known=message.match(/(연관문서는 서로 다른 기관 구분의 같은 업무구분 문서끼리 연결해 주세요\.|연관문서 연결을 해제하거나 동일한 업무구분을 선택해 주세요\.)/);
     response=json({error:e.status?e.message:known?known[1]:'처리하지 못했습니다. 잠시 후 다시 시도해 주세요.'},e.status||(known?409:500));
     if(!e.status&&!known)console.error('request_failed',new URL(request.url).pathname,message.replace(/\n/g,' ').slice(0,500));
   }
