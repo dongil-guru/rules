@@ -54,6 +54,6 @@ try {
   run(['secret','put','ADMIN_PASSWORD_HASH'],{input:passwordHash+'\n'});
   run(['deploy']);
   console.log('\n배포가 완료되었습니다. 위 workers.dev 주소로 접속하세요.');
-  console.log('관리자 아이디: admin / 비밀번호: 방금 설정한 비밀번호');
+  console.log('최초 관리자 아이디: admin / 최초 비밀번호: 방금 설정한 비밀번호. 기존 계정의 ID와 비밀번호는 유지됩니다.');
   console.log('wrangler.jsonc의 D1 ID 변경을 GitHub에도 반영해 주세요.');
 }catch(error){console.error('\n설정을 완료하지 못했습니다. '+error.message);process.exitCode=1;}

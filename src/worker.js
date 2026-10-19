@@ -1,5 +1,6 @@
 const MAX_FILE = 20 * 1024 * 1024;
 const MAX_TOTAL = 40 * 1024 * 1024;
+const DOCUMENT_TYPES = ['지침','매뉴얼','가이드라인','기타'];
 const now = () => new Date().toISOString();
 const uid = () => crypto.randomUUID();
 const fail = (status, message) => { throw Object.assign(new Error(message), {status}); };
@@ -32,19 +33,34 @@ function sessionCookie(request, token, maxAge) {
 }
 async function authorized(request, env) {
   const token = cookieValue(request);
-  if (!/^[a-f0-9]{64}$/.test(token) || !env.DB) return false;
-  return !!await first(env,'SELECT 1 FROM sessions WHERE token_hash=? AND expires_at>?',await digest(token),Date.now());
+  if (!/^[a-f0-9]{64}$/.test(token) || !env.DB) return null;
+  const user=await first(env,'SELECT u.id,u.login_id,u.name,u.last_login_at,u.active,u.is_admin,u.token FROM user_sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>? AND u.active=1',await digest(token),Date.now());
+  return user?publicUser(user):null;
 }
-async function passwordMatches(value, env) {
-  if (env.ADMIN_PASSWORD_HASH) {
-    const [algorithm,iterations,salt,expected] = env.ADMIN_PASSWORD_HASH.split('$');
+async function passwordMatches(value, hash) {
+  if (hash) {
+    const [algorithm,iterations,salt,expected] = hash.split('$');
     if (algorithm!=='pbkdf2' || !/^\d+$/.test(iterations) || !salt || !expected) return false;
     const key = await crypto.subtle.importKey('raw',new TextEncoder().encode(value),'PBKDF2',false,['deriveBits']);
     const bits = await crypto.subtle.deriveBits({name:'PBKDF2',hash:'SHA-256',iterations:Number(iterations),salt:new TextEncoder().encode(salt)},key,256);
     const actual = [...new Uint8Array(bits)].map(b=>b.toString(16).padStart(2,'0')).join('');
     return constantTime(actual,expected);
   }
-  return constantTime(await digest(value), await digest(env.ADMIN_PASSWORD));
+  return false;
+}
+async function hashPassword(value){
+  if(typeof value!=='string'||value.length<12||value.length>256)fail(400,'비밀번호는 12~256자로 입력해 주세요.');
+  const salt=[...crypto.getRandomValues(new Uint8Array(16))].map(b=>b.toString(16).padStart(2,'0')).join('');
+  const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(value),'PBKDF2',false,['deriveBits']);
+  const bits=await crypto.subtle.deriveBits({name:'PBKDF2',hash:'SHA-256',iterations:100000,salt:new TextEncoder().encode(salt)},key,256);
+  return 'pbkdf2$100000$'+salt+'$'+[...new Uint8Array(bits)].map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+function publicUser(user){return {id:user.id,login_id:user.login_id,name:user.name,last_login_at:user.last_login_at||null,active:!!user.active,is_admin:!!user.is_admin,token:user.token,password_mask:'********'};}
+async function ensureAdministrator(env){
+  const existing=await first(env,'SELECT id FROM users WHERE is_admin=1');if(existing)return;
+  const hash=env.ADMIN_PASSWORD_HASH||await hashPassword(env.ADMIN_PASSWORD);
+  const time=now();
+  await stmt(env,'INSERT OR IGNORE INTO users(id,login_id,password_hash,name,last_login_at,active,is_admin,token,created_at,updated_at) VALUES(?,?,?,?,NULL,1,1,?,?,?)',uid(),env.ADMIN_USER||'admin',hash,'관리자',uid(),time,time).run();
 }
 function constantTime(a,b) { if(a.length!==b.length)return false;let n=0;for(let i=0;i<a.length;i++)n|=a.charCodeAt(i)^b.charCodeAt(i);return n===0; }
 async function readJSON(request) {
@@ -54,27 +70,82 @@ async function readJSON(request) {
 }
 async function login(request, env) {
   if (!configReady(env)) fail(503,'사이트 설정이 완료되지 않았습니다. 관리자에게 문의해 주세요.');
+  await ensureAdministrator(env);
   const body = await readJSON(request);
   const ipHash = await digest(request.headers.get('CF-Connecting-IP') || 'local');
   const prior = await first(env,'SELECT * FROM login_attempts WHERE ip_hash=?',ipHash);
   if (prior?.failures>=5 && prior.blocked_until>Date.now()) fail(429,'로그인 시도가 많습니다. 15분 후 다시 시도해 주세요.');
-  const name = typeof body.username==='string'?body.username.slice(0,100):'';
+  const name = typeof body.username==='string'?body.username.normalize('NFC').trim().slice(0,100):'';
   const password = typeof body.password==='string'?body.password:'';
-  if (password.length>256 || name !== (env.ADMIN_USER||'admin') || !await passwordMatches(password,env)) {
+  const user=await first(env,'SELECT * FROM users WHERE login_id=? COLLATE NOCASE',name);
+  if (password.length>256 || !user || !user.active || !await passwordMatches(password,user.password_hash)) {
     await stmt(env,`INSERT INTO login_attempts VALUES(?,1,?) ON CONFLICT(ip_hash) DO UPDATE SET failures=CASE WHEN blocked_until<? THEN 1 ELSE failures+1 END, blocked_until=CASE WHEN blocked_until<? THEN excluded.blocked_until ELSE blocked_until END`,ipHash,Date.now()+900000,Date.now(),Date.now()).run();
     fail(401,'아이디 또는 비밀번호가 올바르지 않습니다.');
   }
   const token = [...crypto.getRandomValues(new Uint8Array(32))].map(b=>b.toString(16).padStart(2,'0')).join('');
-  await env.DB.batch([stmt(env,'DELETE FROM login_attempts WHERE ip_hash=?',ipHash),stmt(env,'INSERT INTO sessions VALUES(?,?)',await digest(token),Date.now()+43200000),stmt(env,'DELETE FROM sessions WHERE expires_at<?',Date.now())]);
-  return json({ok:true},200,{'Set-Cookie':sessionCookie(request,token,43200)});
+  const time=now(),userToken=uid();
+  const result=await env.DB.batch([
+    stmt(env,'UPDATE users SET last_login_at=?,updated_at=?,token=? WHERE id=? AND active=1 AND password_hash=? AND token=?',time,time,userToken,user.id,user.password_hash,user.token),
+    stmt(env,'INSERT INTO user_sessions SELECT ?,?,id FROM users WHERE id=? AND active=1 AND token=?',await digest(token),Date.now()+43200000,user.id,userToken),
+    stmt(env,'DELETE FROM login_attempts WHERE ip_hash=?',ipHash),stmt(env,'DELETE FROM user_sessions WHERE expires_at<?',Date.now())
+  ]);
+  if(!result[0].meta.changes)fail(401,'계정정보가 변경되었습니다. 다시 로그인해 주세요.');
+  return json({ok:true,user:publicUser({...user,last_login_at:time,token:userToken})},200,{'Set-Cookie':sessionCookie(request,token,43200)});
 }
-async function bootstrap(env) {
+async function bootstrap(env,user) {
   const results = await env.DB.batch([
     stmt(env,'SELECT * FROM organizations ORDER BY name COLLATE NOCASE'),
     stmt(env,'SELECT c.*,(SELECT count(*) FROM documents d WHERE d.category_id=c.id) document_count FROM work_categories c ORDER BY c.sort_order,c.id'),
     stmt(env,`SELECT (SELECT count(*) FROM documents) documents, (SELECT count(*) FROM revisions) revisions, (SELECT count(*) FROM organizations) organizations, (SELECT count(DISTINCT document_id) FROM revisions WHERE updated_at>=?) recent`,new Date(Date.now()-30*86400000).toISOString())
   ]);
-  return json({organizations:results[0].results,categories:results[1].results,stats:results[2].results[0]});
+  return json({organizations:results[0].results,categories:results[1].results,stats:results[2].results[0],user,document_types:DOCUMENT_TYPES});
+}
+function requireAdministrator(user){if(!user.is_admin)fail(403,'관리자만 사용할 수 있는 기능입니다.');}
+function userDateTime(value){
+  if(value==null||value==='')return null;
+  if(typeof value!=='string'||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)||!Number.isFinite(new Date(value).getTime()))fail(400,'마지막 로그인 일시를 확인해 주세요.');
+  validDate(value.slice(0,10),'마지막 로그인 날짜');
+  return new Date(value).toISOString();
+}
+async function listUsers(env,user){requireAdministrator(user);return json({users:(await rows(env,'SELECT id,login_id,name,last_login_at,active,is_admin,token FROM users ORDER BY is_admin DESC,created_at,id')).map(publicUser)});}
+async function mutateUser(request,env,user,id){
+  requireAdministrator(user);const body=await readJSON(request),existing=id?await first(env,'SELECT * FROM users WHERE id=?',id):null;
+  if(id&&!existing)fail(404,'사용자를 찾을 수 없습니다.');
+  if(existing&&body.token!==existing.token)fail(409,'사용자 정보가 변경되었습니다. 새로고침 후 다시 시도해 주세요.');
+  if(request.method==='DELETE'){
+    if(existing.is_admin)fail(409,'관리자 계정은 삭제할 수 없습니다.');
+    const result=await stmt(env,'DELETE FROM users WHERE id=? AND token=?',id,body.token).run();if(!result.meta.changes)fail(409,'사용자 정보가 변경되었습니다. 새로고침해 주세요.');
+    return json({ok:true});
+  }
+  const loginId=clean(body.login_id,'ID',100,true),name=clean(body.name,'이름',100,true);
+  const active=body.active===undefined?(existing?!!existing.active:true):body.active;
+  if(typeof active!=='boolean')fail(400,'활성화 여부를 확인해 주세요.');
+  if(existing?.is_admin&&!active)fail(409,'관리자 계정은 비활성화할 수 없습니다.');
+  if(!existing?.is_admin&&loginId.toLowerCase()==='admin')fail(409,'admin은 관리자 계정 전용 ID입니다.');
+  const password=body.password===undefined?'':body.password;
+  if(typeof password!=='string')fail(400,'비밀번호를 확인해 주세요.');
+  const hash=password?await hashPassword(password):existing?.password_hash;
+  if(!hash)fail(400,'비밀번호를 입력해 주세요.');
+  const lastLogin=Object.prototype.hasOwnProperty.call(body,'last_login_at')?userDateTime(body.last_login_at):existing?.last_login_at||null;
+  const key=id||uid(),token=uid(),time=now(),revoke=!!existing&&(!!password||existing.login_id!==loginId||!!existing.active!==active);
+  try{
+    const commands=[existing?stmt(env,'UPDATE users SET login_id=?,password_hash=?,name=?,last_login_at=?,active=?,token=?,updated_at=? WHERE id=? AND token=?',loginId,hash,name,lastLogin,active?1:0,token,time,key,body.token):stmt(env,'INSERT INTO users(id,login_id,password_hash,name,last_login_at,active,is_admin,token,created_at,updated_at) VALUES(?,?,?,?,?,?,0,?,?,?)',key,loginId,hash,name,lastLogin,active?1:0,token,time,time)];
+    if(revoke)commands.push(stmt(env,'DELETE FROM user_sessions WHERE user_id=? AND EXISTS(SELECT 1 FROM users WHERE id=? AND token=?)',key,key,token));
+    const result=await env.DB.batch(commands);if(!result[0].meta.changes)fail(409,'사용자 정보가 변경되었습니다. 새로고침해 주세요.');
+    return json({ok:true,id:key,reauthenticate:revoke&&key===user.id},existing?200:201);
+  }catch(e){if(String(e).includes('UNIQUE'))fail(409,'이미 등록된 ID입니다.');throw e;}
+}
+async function changeOwnPassword(request,env,user){
+  const body=await readJSON(request),existing=await first(env,'SELECT * FROM users WHERE id=?',user.id);
+  if(!existing||!existing.active)fail(401,'다시 로그인해 주세요.');
+  if(typeof body.current_password!=='string'||body.current_password.length>256||!await passwordMatches(body.current_password,existing.password_hash))fail(400,'현재 비밀번호가 올바르지 않습니다.');
+  const hash=await hashPassword(body.new_password),token=uid();
+  const result=await env.DB.batch([
+    stmt(env,'UPDATE users SET password_hash=?,token=?,updated_at=? WHERE id=? AND token=?',hash,token,now(),user.id,existing.token),
+    stmt(env,'DELETE FROM user_sessions WHERE user_id=? AND EXISTS(SELECT 1 FROM users WHERE id=? AND token=?)',user.id,user.id,token)
+  ]);
+  if(!result[0].meta.changes)fail(409,'사용자 정보가 변경되었습니다. 다시 시도해 주세요.');
+  return json({ok:true,reauthenticate:true});
 }
 async function categoryMutation(request, env, id) {
   const existing = id ? await first(env,'SELECT * FROM work_categories WHERE id=?',id) : null;
@@ -133,7 +204,7 @@ async function listDocuments(url,env) {
   const filter=category?'AND d.category_id=?':'';
   const result=await env.DB.batch([
     stmt(env,`SELECT d.id FROM documents d WHERE EXISTS(SELECT 1 FROM revisions s WHERE s.document_id=d.id AND ${search.sql}) ${filter}`,...search.args,...(category?[category]:[])),
-    stmt(env,`SELECT d.id,d.organization_id,d.category_id,o.name organization_name,c.name category_name,c.name category_path,c.sort_order category_order,
+    stmt(env,`SELECT d.id,d.organization_id,d.category_id,d.document_type,o.name organization_name,c.name category_name,c.name category_path,c.sort_order category_order,
       r.id revision_id,r.title,r.revision_date,r.summary,r.manager,r.approval_no,r.sequence,r.updated_at,
       (SELECT count(*) FROM revisions v WHERE v.document_id=d.id) revision_count,
       (SELECT count(*) FROM attachments a WHERE a.revision_id=r.id) attachment_count,
@@ -153,7 +224,7 @@ async function listDocuments(url,env) {
     if(!matches.has(kwwa?.id)&&!matches.has(upper?.id))continue;
     const anchor=kwwa||upper;pairedRows.push({category_id:anchor.category_id,category_path:anchor.category_path,category_order:anchor.category_order,kwwa:kwwa||null,upper:upper||null});
   }
-  pairedRows.sort((a,b)=>a.category_order-b.category_order||a.category_id.localeCompare(b.category_id)||[b.kwwa?.revision_date||'',b.upper?.revision_date||''].sort().at(-1).localeCompare([a.kwwa?.revision_date||'',a.upper?.revision_date||''].sort().at(-1))||(a.kwwa?.title||a.upper.title).localeCompare(b.kwwa?.title||b.upper.title,'ko'));
+  pairedRows.sort((a,b)=>{const left=a.kwwa||a.upper,right=b.kwwa||b.upper;return a.category_order-b.category_order||a.category_id.localeCompare(b.category_id)||DOCUMENT_TYPES.indexOf(left.document_type)-DOCUMENT_TYPES.indexOf(right.document_type)||right.revision_date.localeCompare(left.revision_date)||left.title.localeCompare(right.title,'ko')||left.id.localeCompare(right.id);});
   return json({rows:pairedRows,documents:pairedRows.flatMap(row=>[row.kwwa,row.upper].filter(Boolean))});
 }
 async function detail(env,id) {
@@ -177,7 +248,7 @@ async function references(url,env) {
   if(!['kwwa','upper'].includes(side))fail(400,'기관 구분을 먼저 선택해 주세요.');
   if(!category)fail(400,'업무구분을 먼저 선택해 주세요.');
   const q=(url.searchParams.get('q')||'').normalize('NFC').trim().slice(0,100);
-  const list=await rows(env,`SELECT d.id,d.organization_id,d.category_id,o.name organization_name,r.id revision_id,r.title,r.revision_date,r.sequence
+  const list=await rows(env,`SELECT d.id,d.organization_id,d.category_id,d.document_type,o.name organization_name,r.id revision_id,r.title,r.revision_date,r.sequence
     FROM documents d JOIN organizations o ON o.id=d.organization_id JOIN revisions r ON r.document_id=d.id
     WHERE d.organization_id<>? AND d.category_id=? AND d.id<>?
       AND r.sequence=(SELECT MAX(sequence) FROM revisions WHERE document_id=d.id)
@@ -194,6 +265,8 @@ async function parsedRevision(request) {
   if(!data||typeof data!=='object')fail(400,'입력값을 확인해 주세요.');
   const fields={title:clean(data.title,'문서명',50,true),revision_date:validDate(data.revision_date),summary:clean(data.summary,'설명',300),manager:clean(data.manager,'담당자',100,true),approval_no:clean(data.approval_no,'참조 문서번호',10)};
   const organization=clean(data.organization_id,'기관',80,true),category=clean(data.category_id,'업무구분',80,true);
+  const documentType=data.document_type===undefined?null:clean(data.document_type,'문서종류',20,true);
+  if(documentType&&!DOCUMENT_TYPES.includes(documentType))fail(400,'문서종류는 지침·매뉴얼·가이드라인·기타 중에서 선택해 주세요.');
   if(data.relations!==undefined)fail(400,'문서 연결 방식이 변경되었습니다. 화면을 새로고침한 후 다시 저장해 주세요.');
   const keep=ids(data.keep_attachments||[],'첨부파일',20),related=clean(data.related_document_id,'연관문서',80);
   const hasRelated=Object.prototype.hasOwnProperty.call(data,'related_document_id');
@@ -201,17 +274,19 @@ async function parsedRevision(request) {
   if(files.length+keep.length>20)fail(400,'첨부파일은 이력당 20개까지 등록할 수 있습니다.');
   if(files.some(f=>f.size>MAX_FILE))fail(413,'파일 한 개의 크기는 20MB 이하여야 합니다.');
   if(files.reduce((s,f)=>s+f.size,0)>MAX_TOTAL)fail(413,'한 번에 첨부하는 파일은 총 40MB 이하여야 합니다.');
-  return {data,fields,organization,category,keep,related,hasRelated,files};
+  return {data,fields,organization,category,documentType,keep,related,hasRelated,files};
 }
 async function cleanup(env) {
   const garbage=await rows(env,'SELECT storage_key FROM file_garbage LIMIT 50');
   for(const item of garbage){try{await env.FILES.delete(item.storage_key);await stmt(env,'DELETE FROM file_garbage WHERE storage_key=?',item.storage_key).run();}catch{ /* Retry at the next mutation. */ }}
 }
 async function saveRevision(request,env,ctx,documentId,revisionId) {
-  const {data,fields,organization,category,keep,related,hasRelated,files}=await parsedRevision(request);
+  const {data,fields,organization,category,documentType,keep,related,hasRelated,files}=await parsedRevision(request);
   let original=null;
   if(revisionId){original=await first(env,'SELECT * FROM revisions WHERE id=?',revisionId);if(!original)fail(404,'수정할 이력을 찾을 수 없습니다.');documentId=original.document_id;if(data.token!==original.token)fail(409,'다른 창에서 변경된 이력입니다. 새로고침 후 다시 수정해 주세요.');}
-  if(documentId&&!await first(env,'SELECT 1 FROM documents WHERE id=?',documentId))fail(404,'문서를 찾을 수 없습니다.');
+  const existingDocument=documentId?await first(env,'SELECT * FROM documents WHERE id=?',documentId):null;
+  if(documentId&&!existingDocument)fail(404,'문서를 찾을 수 없습니다.');
+  const type=documentType||existingDocument?.document_type||'지침';
   if(!['kwwa','upper'].includes(organization))fail(400,'기관 구분은 한국상하수도협회 또는 상위기관을 선택해 주세요.');
   if(!await first(env,'SELECT 1 FROM work_categories WHERE id=?',category))fail(400,'업무구분을 선택해 주세요.');
   if(keep.length&&!revisionId)fail(400,'이전 이력의 첨부파일은 원본 이력에서 확인해 주세요. 새 이력에는 파일을 첨부해 주세요.');
@@ -234,8 +309,8 @@ async function saveRevision(request,env,ctx,documentId,revisionId) {
     const guard=revisionId?'EXISTS(SELECT 1 FROM revisions WHERE id=? AND token=?)':'1=1',guardArgs=revisionId?[revId,token]:[];
     if(revisionId)commands.push(stmt(env,'UPDATE revisions SET title=?,revision_date=?,summary=?,manager=?,approval_no=?,token=?,updated_at=? WHERE id=? AND token=?',...f,token,time,revId,data.token));
     if(documentId)commands.push(stmt(env,`DELETE FROM document_pairs WHERE (kwwa_id=? OR upper_id=?) AND ${guard}`,docId,docId,...guardArgs));
-    if(!documentId)commands.push(stmt(env,'INSERT INTO documents VALUES(?,?,?,?)',docId,organization,category,time));
-    else commands.push(stmt(env,`UPDATE documents SET organization_id=?,category_id=? WHERE id=? AND ${guard}`,organization,category,docId,...guardArgs));
+    if(!documentId)commands.push(stmt(env,'INSERT INTO documents(id,organization_id,category_id,created_at,document_type) VALUES(?,?,?,?,?)',docId,organization,category,time,type));
+    else commands.push(stmt(env,`UPDATE documents SET organization_id=?,category_id=?,document_type=? WHERE id=? AND ${guard}`,organization,category,type,docId,...guardArgs));
     if(!revisionId)commands.push(stmt(env,'INSERT INTO revisions (id,document_id,sequence,title,revision_date,summary,manager,approval_no,token,created_at,updated_at) SELECT ?,?,COALESCE(MAX(sequence),0)+1,?,?,?,?,?,?,?,? FROM revisions WHERE document_id=?',revId,docId,...f,token,time,time,docId));
     if(target)commands.push(stmt(env,`INSERT INTO document_pairs(kwwa_id,upper_id,created_at) SELECT ?,?,? WHERE ${guard}`,organization==='kwwa'?docId:target,organization==='upper'?docId:target,time,...guardArgs));
     if(revisionId)commands.push(stmt(env,`DELETE FROM attachments WHERE revision_id=? ${keep.length?`AND id NOT IN (${keep.map(()=>'?').join(',')})`:''} AND ${guard}`,revId,...keep,...guardArgs));
@@ -275,12 +350,19 @@ async function route(request,env,ctx) {
     return asset.status===404&&request.headers.get('Accept')?.includes('text/html')?env.ASSETS.fetch(new Request(new URL('/index.html',url),request)):asset;
   }
   if(!['GET','HEAD'].includes(method)&&request.headers.get('Origin')!==url.origin)fail(403,'같은 사이트에서만 변경할 수 있습니다. 페이지를 새로고침해 주세요.');
-  if(path==='/api/session'&&method==='GET')return json({authenticated:await authorized(request,env),configured:configReady(env),username:env.ADMIN_USER||'admin'});
+  if(path==='/api/session'&&method==='GET'){const user=await authorized(request,env);return json({authenticated:!!user,user,configured:configReady(env),username:env.ADMIN_USER||'admin'});}
   if(path==='/api/login'&&method==='POST')return login(request,env);
-  if(path==='/api/health'&&method==='GET')return json({ready:configReady(env)});
-  if(!await authorized(request,env))fail(401,'로그인이 필요합니다. 다시 로그인해 주세요.');
-  if(path==='/api/logout'&&method==='POST'){await stmt(env,'DELETE FROM sessions WHERE token_hash=?',await digest(cookieValue(request))).run();return json({ok:true},200,{'Set-Cookie':sessionCookie(request,'',0)});}
-  if(path==='/api/bootstrap'&&method==='GET')return bootstrap(env);
+  if(path==='/api/health'&&method==='GET'){if(configReady(env))await ensureAdministrator(env);return json({ready:configReady(env)&&!!await first(env,'SELECT id FROM users WHERE is_admin=1 AND active=1'),account_management:true});}
+  const user=await authorized(request,env);
+  if(!user)fail(401,'로그인이 필요합니다. 다시 로그인해 주세요.');
+  if(path==='/api/logout'&&method==='POST'){await stmt(env,'DELETE FROM user_sessions WHERE token_hash=?',await digest(cookieValue(request))).run();return json({ok:true},200,{'Set-Cookie':sessionCookie(request,'',0)});}
+  if(path==='/api/me'&&method==='GET')return json({user});
+  if(path==='/api/me/password'&&method==='PUT')return changeOwnPassword(request,env,user);
+  if(path==='/api/users'&&method==='GET')return listUsers(env,user);
+  if(path==='/api/users'&&method==='POST')return mutateUser(request,env,user);
+  const account=path.match(/^\/api\/users\/([\w-]+)$/);
+  if(account){requireAdministrator(user);if(['PUT','DELETE'].includes(method))return mutateUser(request,env,user,account[1]);fail(405,'허용되지 않는 요청입니다.');}
+  if(path==='/api/bootstrap'&&method==='GET')return bootstrap(env,user);
   if(path==='/api/categories/order'&&method==='PUT')return reorderCategories(request,env);
   const category=path.match(/^\/api\/(organizations|categories)(?:\/([\w-]+))?$/);
   if(category&&['POST','PUT','DELETE'].includes(method)){if(category[1]==='organizations')fail(405,'기관 구분은 한국상하수도협회와 상위기관으로 고정되어 있습니다.');if((method==='POST'&&category[2])||(method!=='POST'&&!category[2]))fail(405,'허용되지 않는 요청입니다.');return categoryMutation(request,env,category[2]);}

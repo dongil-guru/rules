@@ -175,3 +175,33 @@ input[type=radio]{width:17px;height:17px;min-height:17px;accent-color:#147d71;fl
 
 /* Separate year and month inputs share the search field typography. */
 .year-month input,.year-month select{font-size:inherit;min-width:0;flex:1 1 180px}
+
+/* Document kinds and account management. */
+.paired-title-cell button{display:flex;align-items:flex-start;gap:9px}
+.paired-document-name{min-width:0;flex:1}
+.document-type-icon{display:inline-flex;align-items:center;justify-content:center;width:25px;height:28px;flex:0 0 25px;border-radius:5px;background:#e8f3ec;color:#53876b;margin-top:2px}
+.document-type-icon svg{width:16px;height:16px}
+.document-type-icon.type-1{background:#eaf0f9;color:#6687b5}
+.document-type-icon.type-2{background:#f3eef8;color:#9273ae}
+.document-type-icon.type-3{background:#f4f0e8;color:#a08b64}
+.form-grid.document-form{grid-template-columns:repeat(6,minmax(0,1fr))}
+.document-form>.field{grid-column:span 3}
+.document-form>.field.document-classification{grid-column:span 2}
+.document-form>.wide{grid-column:1/-1}
+.account-menu{display:flex;align-items:center;gap:10px;width:100%;padding:11px 8px;margin-bottom:15px;color:#607c72;font-weight:600;border-radius:7px;text-align:left}
+.account-menu:hover,.account-menu.active{background:#eaf4f1;color:#13786d}
+.users-table-scroll{overflow-x:auto}
+.users-table{width:100%;min-width:900px;border-collapse:collapse;font-size:16.8px}
+.users-table th,.users-table td{padding:17px 16px;text-align:left;border-bottom:1px solid #e6edef;vertical-align:middle;overflow-wrap:anywhere}
+.users-table th{background:#edf5f2;color:#547769;font-weight:600}
+.users-table td:nth-child(4){white-space:nowrap}
+.users-table tr:last-child td{border-bottom:0}
+.user-role{display:block;font-size:14px;color:#849c90;margin-top:4px}
+.masked-password{letter-spacing:2px;color:#8a9ba4}
+.user-status{display:inline-flex;padding:4px 9px;border-radius:5px;white-space:nowrap}
+.user-status.enabled{background:#eaf5ee;color:#54866a}
+.user-status.disabled{background:#f3eeee;color:#a47676}
+.user-row-actions{display:flex;gap:12px;white-space:nowrap}
+.user-row-actions button:disabled{cursor:not-allowed;opacity:.4}
+.password-fields{display:grid;gap:20px}
+@media(max-width:700px){.form-grid.document-form{grid-template-columns:minmax(0,1fr)}.document-form>.field,.document-form>.field.document-classification{grid-column:1/-1}}

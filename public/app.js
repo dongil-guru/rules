@@ -1,5 +1,7 @@
 const paths={file:'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M8 13h8 M8 17h6',folder:'M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',building:'M4 22V4l8-2 8 2v18 M1 22h22 M9 22v-5h6v5 M8 7h1 M15 7h1 M8 11h1 M15 11h1',layers:'m12 3 10 6-10 6L2 9z M2 14l10 6 10-6 M2 19l10 6 10-6',history:'M3 11a9 9 0 1 1 2 7 M3 4v7h7 M12 7v5l3 2',search:'m21 21-5-5 M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0',plus:'M12 5v14 M5 12h14',chevron:'m9 5 7 7-7 7',down:'m6 9 6 6 6-6',arrow:'M5 12h14 m-5-5 5 5-5 5',back:'M19 12H5 m7-7-7 7 7 7',clip:'m21 11-8 8a6 6 0 0 1-8-8l9-9a4 4 0 0 1 6 6L10 18a2 2 0 0 1-3-3l9-9',link:'M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-2 2 M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l2-2',download:'M12 3v12 m-5-5 5 5 5-5 M3 16v5h18v-5',edit:'m16 3 5 5-12 12-6 1 1-6z M14 5l5 5',trash:'M3 6h18 M9 6V3h6v3 M5 6l1 15h12l1-15 M10 10v7 M14 10v7',close:'M6 6l12 12 M6 18 18 6',logout:'M9 4H4v16h5 M9 12h12 m-4-4 4 4-4 4',check:'m5 12 4 4L19 6',tree:'M5 3v13h6 M5 8h6 M15 5h6v6h-6z M15 15h6v6h-6z',list:'M8 6h13 M8 12h13 M8 18h13 M3 6h.01 M3 12h.01 M3 18h.01',settings:'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8 M10 2h4l1 3 3 1 3 1v4l-2 2-1 3 1 3-3 2-3-1-3 1-3-2 1-3-1-3-2-2V7l3-1 3-1z',home:'m3 10 9-7 9 7 M5 9v12h14V9 M9 21v-7h6v7',info:'M12 11v6 M12 7h.01 M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0',lock:'M5 10h14v11H5z M8 10V6a4 4 0 0 1 8 0v4 M12 14v3',upload:'M12 16V3 m-5 5 5-5 5 5 M3 16v5h18v-5',menu:'M3 6h18 M3 12h18 M3 18h18',refresh:'M20 7a9 9 0 1 0 1 9 M21 2v6h-6'};
 const SIDES=[{id:'kwwa',name:'한국상하수도협회'},{id:'upper',name:'상위기관'}];
+const DOCUMENT_TYPES=['지침','매뉴얼','가이드라인','기타'];
+Object.assign(paths,{book:'M12 5v16 M12 5C8 2 4 3 2 4v15c4-1 7-1 10 2 3-3 6-3 10-2V4c-3-1-6-2-10 1',guide:'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18 M16 8l-3 5-5 3 3-5z',other:'M5 3h10l4 4v14H5z M9 12h.01 M12 12h.01 M15 12h.01',users:'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2 M9 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8 M17 4a4 4 0 0 1 0 7 M22 21v-2a4 4 0 0 0-3-3.87'});
 const icon=(name,cls='')=>`<svg class="icon ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${paths[name]||paths.file}"/></svg>`;
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const $=s=>document.querySelector(s);
@@ -7,7 +9,11 @@ const today=()=>new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Seoul',year:'num
 const size=b=>b>=1048576?`${(b/1048576).toFixed(1)} MB`:b>=1024?`${Math.ceil(b/1024)} KB`:`${b} B`;
 const revName=n=>Number(n)===1?'제정':`${Number(n)-1}차 개정`;
 const badge=n=>`<span class="badge ${Number(n)===1?'enacted':'revised'}">${revName(n)}</span>`;
-const state={bootstrap:{organizations:[],categories:[],stats:{}},documents:[],rows:[],detail:null,view:'list',category:'',searchOpen:false,search:{title:'',manager:'',year:'',month:''},error:'',loading:true,categoryTab:'categories',categoryEdit:null,categoryBusy:false,editor:null,authenticated:false};
+const state={bootstrap:{organizations:[],categories:[],stats:{}},documents:[],rows:[],detail:null,view:'list',category:'',searchOpen:false,search:{title:'',manager:'',year:'',month:''},error:'',loading:true,categoryTab:'categories',categoryEdit:null,categoryBusy:false,editor:null,user:null,users:[],usersLoading:false,usersError:'',userEditor:null,authenticated:false};
+const currentUser=()=>state.user||state.bootstrap.user||{is_admin:false,name:'사용자',login_id:''};
+const typeIcon=type=>{const name=DOCUMENT_TYPES.includes(type)?type:'지침',index=DOCUMENT_TYPES.indexOf(name);return `<span class="document-type-icon type-${index}" title="${name}" aria-label="문서종류: ${name}">${icon(['file','book','guide','other'][index])}</span>`;};
+const dateTime=value=>value?new Intl.DateTimeFormat('ko-KR',{timeZone:'Asia/Seoul',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date(value)):'';
+const dateTimeInput=value=>value?new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Seoul',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date(value)).replace(' ','T'):'';
 let toastTimer, listGeneration=0, detailGeneration=0, refTimer, refsGeneration=0, confirmResolve=null;
 const catPath=id=>state.bootstrap.categories.find(c=>c.id===id)?.name||'';
 function notify(message){clearTimeout(toastTimer);$('#toast').textContent=message;$('#toast').classList.add('show');toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),3800);}
@@ -16,7 +22,7 @@ async function api(path,options={}){
   if(init.json){init.body=JSON.stringify(init.json);delete init.json;init.headers={'Content-Type':'application/json',...init.headers};}
   let response;try{response=await fetch(path,init);}catch{throw new Error('서버에 연결할 수 없습니다. 인터넷 연결을 확인해 주세요.');}
   const data=await response.json().catch(()=>({error:'서버 응답을 읽지 못했습니다.'}));
-  if(!response.ok){if(response.status===401&&!path.endsWith('/login')){state.authenticated=false;document.querySelectorAll('dialog[open]').forEach(d=>d.close());renderLogin('로그인이 만료되었습니다. 다시 로그인해 주세요.');}throw new Error(data.error||'처리하지 못했습니다.');}return data;
+  if(!response.ok){if(response.status===401&&!path.endsWith('/login')){state.authenticated=false;state.user=null;state.users=[];state.bootstrap.user=null;document.querySelectorAll('dialog[open]').forEach(d=>d.close());renderLogin('로그인이 만료되었습니다. 다시 로그인해 주세요.');}throw new Error(data.error||'처리하지 못했습니다.');}return data;
 }
 function showError(id,message){const el=$(id);if(el){el.textContent=message;el.classList.toggle('hidden',!message);}}
 function queryString(){const q=new URLSearchParams({...state.search});if(state.category)q.set('category',state.category);return q.toString();}
@@ -24,7 +30,7 @@ async function reloadAll(){
   const generation=++listGeneration;
   const [base,list]=await Promise.all([api('/api/bootstrap'),api('/api/documents?'+queryString())]);
   if(generation!==listGeneration)return;
-  state.bootstrap=base;state.documents=list.documents;state.rows=list.rows||[];state.loading=false;state.error='';
+  state.bootstrap=base;state.user=base.user||state.user;state.documents=list.documents;state.rows=list.rows||[];state.loading=false;state.error='';
   if(state.authenticated)render();
 }
 async function refreshList(){state.loading=true;render();try{const generation=++listGeneration;const data=await api('/api/documents?'+queryString());if(generation!==listGeneration)return;state.documents=data.documents;state.rows=data.rows||[];state.error='';}catch(e){state.error=e.message;}finally{state.loading=false;if(state.authenticated)render();}}
@@ -37,6 +43,7 @@ async function handleRoute(){
   if(!state.authenticated)return;
   const params=new URLSearchParams(location.hash.slice(1)),id=params.get('document'),revision=params.get('revision');
   const generation=++detailGeneration;
+  if(params.has('users')){state.view='users';state.detail=null;state.usersLoading=true;state.usersError='';render();try{await loadUserList();}catch(e){state.usersError=e.message;}finally{if(generation===detailGeneration){state.usersLoading=false;render();}}return;}
   if(!id){state.view='list';state.detail=null;render();return;}
   state.view='detail';state.detail=null;render();
   try{const data=await api('/api/documents/'+encodeURIComponent(id));if(generation!==detailGeneration)return;state.detail=data;state.focusRevision=revision;render();if(revision)requestAnimationFrame(()=>document.getElementById('revision-'+revision)?.scrollIntoView({behavior:'smooth',block:'nearest'}));else window.scrollTo(0,0);}catch(e){if(generation!==detailGeneration)return;state.error=e.message;state.view='list';render();}
@@ -46,11 +53,11 @@ function renderLogin(message='',configured=true,username='admin'){
 }
 function sidebar(){
   const b=state.bootstrap;
-  return `<aside class="sidebar"><a class="brand" href="#" data-action="home"><img src="/favicon.svg" alt=""><div><strong>문서관리</strong><small>DOCUMENT HUB</small></div></a><button class="side-main" data-action="home">${icon('layers')}전체 문서</button><div class="side-scroll"><div class="side-label"><span>업무구분</span><button data-action="categories" title="업무구분 관리" aria-label="업무구분 관리">${icon('plus')}</button></div>${b.categories.map(c=>`<button class="filter-item ${state.category===c.id?'active':''}" data-action="filter-cat" data-id="${c.id}">${icon('folder')}${esc(c.name)}</button>`).join('')||'<div class="category-empty">등록된 업무구분이 없습니다.</div>'}</div><div class="sidebar-footer"><div class="workspace-pill"><div class="avatar">관</div><div><strong>관리자</strong><span>업무 문서 관리 공간</span></div><button data-action="logout" title="로그아웃" aria-label="로그아웃">${icon('logout')}</button></div></div></aside>`;
+  return `<aside class="sidebar"><a class="brand" href="#" data-action="home"><img src="/favicon.svg" alt=""><div><strong>문서관리</strong><small>DOCUMENT HUB</small></div></a><button class="side-main" data-action="home">${icon('layers')}전체 문서</button><div class="side-scroll"><div class="side-label"><span>업무구분</span><button data-action="categories" title="업무구분 관리" aria-label="업무구분 관리">${icon('plus')}</button></div>${b.categories.map(c=>`<button class="filter-item ${state.category===c.id?'active':''}" data-action="filter-cat" data-id="${c.id}">${icon('folder')}${esc(c.name)}</button>`).join('')||'<div class="category-empty">등록된 업무구분이 없습니다.</div>'}</div><div class="sidebar-footer"><button class="account-menu ${state.view==='users'?'active':''}" data-action="users">${icon('users')}사용자 관리</button><div class="workspace-pill"><div class="avatar">${esc([...currentUser().name][0]||'사')}</div><div><strong>${esc(currentUser().name)}</strong><span>${esc(currentUser().login_id)}</span></div><button data-action="logout" title="로그아웃" aria-label="로그아웃">${icon('logout')}</button></div></div></aside>`;
 }
 function render(){
   if(!state.authenticated)return;
-  $('#app').innerHTML=`${sidebar()}<div class="main"><header class="topbar"><div><button class="mobile-menu" data-action="menu" aria-label="업무구분 메뉴 열기">${icon('menu')}</button><div class="breadcrumbs">${icon('home')}업무 공간 ${icon('chevron')}<strong>문서 관리</strong>${state.view==='detail'?`${icon('chevron')}<span>제·개정 이력</span>`:''}</div></div><div class="top-status"><span class="status-dot"></span>문서와 이력을 안전하게 보관합니다</div></header><main class="page">${state.view==='detail'?detailView():listView()}<footer class="page-footer">문서관리<span>·</span>업무의 기준과 변화를 함께 기록합니다.</footer></main></div>`;
+  $('#app').innerHTML=`${sidebar()}<div class="main"><header class="topbar"><div><button class="mobile-menu" data-action="menu" aria-label="업무구분 메뉴 열기">${icon('menu')}</button><div class="breadcrumbs">${icon('home')}업무 공간 ${icon('chevron')}<strong>문서 관리</strong>${state.view==='detail'?`${icon('chevron')}<span>제·개정 이력</span>`:state.view==='users'?`${icon('chevron')}<span>사용자 관리</span>`:''}</div></div><div class="top-status"><span class="status-dot"></span>문서와 이력을 안전하게 보관합니다</div></header><main class="page">${state.view==='detail'?detailView():state.view==='users'?usersView():listView()}<footer class="page-footer">문서관리<span>·</span>업무의 기준과 변화를 함께 기록합니다.</footer></main></div>`;
 }
 function listView(){
   const filters=state.category?[catPath(state.category)]:[];
@@ -59,7 +66,7 @@ function listView(){
 const displayDate=value=>value?value.split('-').map(Number).join('.')+'.':'';
 function documentCells(document){
   if(!document)return '<td class="empty-document-cell" aria-label="연관문서 없음"></td><td class="empty-document-cell"></td>';
-  return `<td class="paired-title-cell"><button data-action="open" data-id="${document.id}" title="${esc(document.title)} 전체 이력 보기">${esc(document.title)}</button></td><td class="paired-date-cell"><time datetime="${esc(document.revision_date)}">${esc(displayDate(document.revision_date))}</time></td>`;
+  return `<td class="paired-title-cell"><button data-action="open" data-id="${document.id}" title="${esc(document.title)} 전체 이력 보기">${typeIcon(document.document_type)}<span class="paired-document-name">${esc(document.title)}</span></button></td><td class="paired-date-cell"><time datetime="${esc(document.revision_date)}">${esc(displayDate(document.revision_date))}</time></td>`;
 }
 function documentList(){
   const rows=[...state.rows],searching=Object.values(state.search).some(value=>value.trim());
@@ -71,7 +78,7 @@ function documentList(){
     }
   }
   const categoryOrder=new Map(state.bootstrap.categories.map((c,index)=>[c.id,index]));
-  rows.sort((a,b)=>(categoryOrder.get(a.category_id)??Number.MAX_SAFE_INTEGER)-(categoryOrder.get(b.category_id)??Number.MAX_SAFE_INTEGER));
+  rows.sort((a,b)=>{const left=a.kwwa||a.upper,right=b.kwwa||b.upper;return (categoryOrder.get(a.category_id)??Number.MAX_SAFE_INTEGER)-(categoryOrder.get(b.category_id)??Number.MAX_SAFE_INTEGER)||DOCUMENT_TYPES.indexOf(left?.document_type||'지침')-DOCUMENT_TYPES.indexOf(right?.document_type||'지침')||(right?.revision_date||'').localeCompare(left?.revision_date||'');});
   if(!rows.length){const search=searching||state.category;return `<div class="empty"><div class="empty-icon">${icon(search?'search':'folder')}</div><h3>${search?'검색된 문서가 없습니다':'첫 번째 업무 문서를 등록해 보세요'}</h3><p>${search?'검색어와 업무구분, 연도·월을 확인해 주세요.':'업무구분을 설정한 후 문서를 등록하세요.<br>연관문서를 연결하면 같은 행에 나란히 표시됩니다.'}</p><button class="btn ${search?'':'primary'}" data-action="${search?'reset':'new'}">${icon(search?'refresh':'plus')}${search?'검색 초기화':'문서 등록'}</button></div>`;}
   const groups=new Map();for(const row of rows){if(!groups.has(row.category_id))groups.set(row.category_id,[]);groups.get(row.category_id).push(row);}
   return `<div class="paired-table-scroll"><table class="paired-document-table"><caption class="sr-only">업무구분별 한국상하수도협회와 상위기관의 최신 문서 및 제·개정 일자</caption><colgroup><col class="business-col"><col><col class="date-col"><col><col class="date-col"></colgroup><thead><tr><th rowspan="2" scope="col">업무구분</th><th colspan="2" scope="colgroup">한국상하수도협회</th><th colspan="2" scope="colgroup">상위기관</th></tr><tr><th scope="col">문서명</th><th scope="col">제·개정 일자</th><th scope="col">문서명</th><th scope="col">제·개정 일자</th></tr></thead>${[...groups.values()].map(rows=>`<tbody>${rows.map((row,index)=>`<tr>${index===0?`<th class="business-cell" scope="rowgroup" rowspan="${rows.length}">${esc(row.category_path||catPath(row.category_id))}</th>`:''}${documentCells(row.kwwa)}${documentCells(row.upper)}</tr>`).join('')}</tbody>`).join('')}</table></div>`;
@@ -95,6 +102,52 @@ function detailView(){
   return `<div class="back-row"><button data-action="back">${icon('back')}문서목록으로 돌아가기</button></div><div class="page-heading detail-page-heading"><div><h1>${esc(catPath(state.detail.document.category_id)||state.detail.document.category_name)} 제·개정 이력</h1><p>한국상하수도협회와 상위기관의 제·개정 정보를 나란히 확인합니다.</p></div></div><div class="paired-detail-scroll"><div class="institution-comparison">${SIDES.map(side=>institutionHistory(side,state.detail.columns?.[side.id]||null)).join('')}</div></div>`;
 }
 function categoryOptions(selected=''){const current=selected||state.bootstrap.categories[0]?.id;return state.bootstrap.categories.map(c=>`<option value="${c.id}" ${current===c.id?'selected':''}>${esc(c.name)}</option>`).join('');}
+async function loadUserList(){
+  const own=await api('/api/me');state.user=own.user;
+  state.users=own.user.is_admin?(await api('/api/users')).users:[own.user];
+}
+function usersView(){
+  const own=currentUser(),admin=own.is_admin,list=admin?state.users:[own];
+  return `<div class="page-heading"><div><h1>${admin?'사용자 관리':'내 계정정보'}</h1><p>${admin?'사용자 계정과 활성화 상태를 관리합니다.':'본인의 계정정보를 확인하고 비밀번호를 변경할 수 있습니다.'}</p></div>${admin?`<button class="btn primary" data-action="add-user">${icon('plus')}사용자 추가</button>`:'<button class="btn primary" data-action="change-password">비밀번호 변경</button>'}</div>${state.usersError?`<div class="error-box" role="alert">${esc(state.usersError)}</div>`:''}<section class="document-panel">${state.usersLoading?'<div class="loading-line">사용자 정보를 불러오고 있습니다.</div>':`<div class="users-table-scroll"><table class="users-table"><thead><tr><th scope="col">ID</th><th scope="col">비밀번호</th><th scope="col">이름</th><th scope="col">마지막 로그인 일시</th><th scope="col">활성화 여부</th>${admin?'<th scope="col">관리</th>':''}</tr></thead><tbody>${list.map(user=>`<tr><td>${esc(user.login_id)}${user.is_admin?'<span class="user-role">관리자</span>':''}</td><td class="masked-password" aria-label="비밀번호 마스킹">********</td><td>${esc(user.name)}</td><td>${user.last_login_at?`<time datetime="${esc(user.last_login_at)}">${esc(dateTime(user.last_login_at))}</time>`:''}</td><td><span class="user-status ${user.active?'enabled':'disabled'}">${user.active?'활성화':'비활성화'}</span></td>${admin?`<td><div class="user-row-actions"><button class="text-btn" data-action="edit-user" data-id="${user.id}">수정</button><button class="text-btn danger-text" data-action="delete-user" data-id="${user.id}" ${user.is_admin?'disabled title="관리자 계정은 삭제할 수 없습니다."':''}>삭제</button></div></td>`:''}</tr>`).join('')}</tbody></table></div>`}</section>`;
+}
+function openUserEditor(id){
+  if(!currentUser().is_admin){notify('관리자만 사용할 수 있는 기능입니다.');return;}
+  const user=id?state.users.find(user=>user.id===id):null;if(id&&!user){notify('사용자를 찾을 수 없습니다.');return;}
+  state.userEditor={user,busy:false};
+  $('#user-dialog').innerHTML=`<div class="dialog-head"><div><h2 id="user-heading">${user?'사용자 수정':'사용자 추가'}</h2><p>${user?'변경할 계정정보를 입력하세요.':'새 사용자의 계정정보를 입력하세요.'}</p></div><button class="close-button" data-action="close-user" aria-label="닫기">${icon('close')}</button></div><form id="user-form"><div class="dialog-body"><div id="user-error" class="error-box hidden" role="alert"></div><div class="form-grid"><label class="field"><span>ID <b class="required">*</b></span><input name="login_id" value="${esc(user?.login_id||'')}" required maxlength="100" autocomplete="off"></label><label class="field"><span>비밀번호 ${user?'':'<b class="required">*</b>'}</span><input name="password" type="password" ${user?'':'required'} minlength="12" maxlength="256" autocomplete="new-password" placeholder="${user?'변경할 때만 입력':'12자 이상 입력'}">${user?'<small>비워두면 현재 비밀번호를 유지합니다.</small>':''}</label><label class="field wide"><span>이름 <b class="required">*</b></span><input name="name" value="${esc(user?.name||'')}" required maxlength="100"></label><label class="field"><span>마지막 로그인 일시</span><input name="last_login_at" type="datetime-local" min="1900-01-01T00:00" max="9999-12-31T23:59" value="${esc(dateTimeInput(user?.last_login_at))}"></label><label class="field"><span>활성화 여부</span><select name="active"><option value="1" ${user?.active===false?'':'selected'}>활성화</option><option value="0" ${user?.active===false?'selected':''} ${user?.is_admin?'disabled':''}>비활성화</option></select>${user?.is_admin?'<small>관리자 계정은 활성화 상태를 유지합니다.</small>':''}</label></div></div><div class="dialog-foot"><button type="button" class="btn" data-action="close-user">취소</button><button class="btn primary" id="save-user" type="submit">저장</button></div></form>`;
+  $('#user-dialog').showModal();document.body.classList.add('dialog-open');
+}
+function openPasswordEditor(){
+  state.userEditor={user:currentUser(),busy:false};
+  $('#user-dialog').innerHTML=`<div class="dialog-head"><div><h2 id="user-heading">비밀번호 변경</h2><p>변경 후에는 새 비밀번호로 다시 로그인해 주세요.</p></div><button class="close-button" data-action="close-user" aria-label="닫기">${icon('close')}</button></div><form id="password-form"><div class="dialog-body"><div id="user-error" class="error-box hidden" role="alert"></div><div class="password-fields"><label class="field"><span>현재 비밀번호</span><input name="current_password" type="password" required maxlength="256" autocomplete="current-password"></label><label class="field"><span>새 비밀번호</span><input name="new_password" type="password" required minlength="12" maxlength="256" autocomplete="new-password"></label><label class="field"><span>새 비밀번호 확인</span><input name="confirm_password" type="password" required minlength="12" maxlength="256" autocomplete="new-password"></label></div></div><div class="dialog-foot"><button type="button" class="btn" data-action="close-user">취소</button><button class="btn primary" id="save-user" type="submit">비밀번호 변경</button></div></form>`;
+  $('#user-dialog').showModal();document.body.classList.add('dialog-open');
+}
+function accountLoginAgain(loginId,message){
+  state.userEditor=null;$('#user-dialog').close();document.body.classList.remove('dialog-open');state.authenticated=false;state.user=null;state.users=[];location.hash='';renderLogin(message,true,loginId);
+}
+async function saveUser(form){
+  const editor=state.userEditor;if(!editor||editor.busy)return;editor.busy=true;const button=$('#save-user');button.disabled=true;showError('#user-error','');
+  try{
+    const data=Object.fromEntries(new FormData(form));data.active=data.active==='1';data.token=editor.user?.token;
+    data.last_login_at=data.last_login_at===dateTimeInput(editor.user?.last_login_at)?editor.user?.last_login_at||null:data.last_login_at?new Date(data.last_login_at+'+09:00').toISOString():null;
+    const result=await api('/api/users'+(editor.user?'/'+editor.user.id:''),{method:editor.user?'PUT':'POST',json:data});
+    if(result.reauthenticate){accountLoginAgain(data.login_id,'계정정보를 변경했습니다. 새 정보로 다시 로그인해 주세요.');return;}
+    editor.busy=false;$('#user-dialog').close();state.userEditor=null;document.body.classList.remove('dialog-open');await reloadAll();await loadUserList();render();notify('사용자 정보를 저장했습니다.');
+  }catch(e){showError('#user-error',e.message);}finally{editor.busy=false;button.disabled=false;}
+}
+async function saveOwnPassword(form){
+  const editor=state.userEditor;if(!editor||editor.busy)return;const data=Object.fromEntries(new FormData(form));showError('#user-error','');
+  if(data.new_password!==data.confirm_password){showError('#user-error','새 비밀번호와 확인 입력이 일치하지 않습니다.');return;}
+  editor.busy=true;const button=$('#save-user');button.disabled=true;
+  try{await api('/api/me/password',{method:'PUT',json:{current_password:data.current_password,new_password:data.new_password}});accountLoginAgain(editor.user.login_id,'비밀번호를 변경했습니다. 새 비밀번호로 다시 로그인해 주세요.');}
+  catch(e){showError('#user-error',e.message);}finally{editor.busy=false;button.disabled=false;}
+}
+async function removeUser(id){
+  if(!currentUser().is_admin)return;const user=state.users.find(user=>user.id===id);if(!user)return;
+  if(user.is_admin){notify('관리자 계정은 삭제할 수 없습니다.');return;}
+  if(!await askConfirm('사용자를 삭제할까요?','계정과 로그인 세션이 삭제됩니다. 등록된 문서는 유지됩니다.',user.login_id+' · '+user.name))return;
+  try{await api('/api/users/'+id,{method:'DELETE',json:{token:user.token}});await loadUserList();render();notify('사용자를 삭제했습니다.');}catch(e){state.usersError=e.message;render();}
+}
 function openEditor(mode,revisionId,documentId){
   const b=state.bootstrap;if(!b.categories.length){notify('업무구분을 먼저 등록해 주세요.');openCategories();return;}
   const detail=mode==='new'?null:detailBundle(documentId);if(mode!=='new'&&!detail){notify('문서를 찾을 수 없습니다. 새로고침해 주세요.');return;}
@@ -103,9 +156,9 @@ function openEditor(mode,revisionId,documentId){
   const partner=detail?.related_document_id?detailBundle(detail.related_document_id):null;
   const relations=partner?[{id:partner.document.id,organization_id:partner.document.organization_id,category_id:partner.document.category_id,...{title:partner.revisions[0].title,revision_date:partner.revisions[0].revision_date,sequence:partner.revisions[0].sequence,organization_name:partner.document.organization_name}}]:[];
   state.editor={mode,documentId:detail?.document.id||null,revisionId:mode==='edit'?original.id:null,token:original?.token,files:[],kept:mode==='edit'?[...original.attachments]:[],relations,busy:false};
-  const org=detail?.document.organization_id||'kwwa',category=detail?.document.category_id||b.categories[0]?.id||'';
+  const org=detail?.document.organization_id||'kwwa',category=detail?.document.category_id||b.categories[0]?.id||'',documentType=detail?.document.document_type||'지침';
   const label=mode==='new'?'문서 등록':mode==='append'?'개정본 추가':'제·개정 이력 수정';
-  $('#editor-dialog').innerHTML=`<div class="dialog-head"><div><h2 id="editor-heading">${label}</h2><p>${mode==='new'?'새 문서의 최초 제정 이력을 등록합니다.':mode==='append'?'기존 문서에 새로운 개정 이력을 이어서 등록합니다.':'선택한 이력의 정보와 첨부파일, 연관문서를 수정합니다.'}</p></div><button class="close-button" data-action="close-editor" aria-label="닫기">${icon('close')}</button></div><form id="revision-form"><div class="dialog-body"><div id="editor-error" class="error-box hidden" role="alert"></div><div class="form-grid"><label class="field"><span>업무구분 <b class="required">*</b></span><select name="category_id" id="editor-category" required>${categoryOptions(category)}</select></label><label class="field"><span>기관 구분 <b class="required">*</b></span><select name="organization_id" id="editor-org" required>${SIDES.map(o=>`<option value="${o.id}" ${org===o.id?'selected':''}>${esc(o.name)}</option>`).join('')}</select></label>${mode==='edit'?'<div class="notice-box wide">기관 구분·업무구분·연관문서 변경은 문서 전체에 반영됩니다.</div>':''}<label class="field wide"><span>문서명 <b class="required">*</b><span class="counter" data-counter-for="editor-title">0 / 50</span></span><input id="editor-title" name="title" required maxlength="50" value="${esc(original?.title||'')}" placeholder="예: 개인정보 보호 내부관리계획"></label><label class="field"><span>제·개정 일자 <b class="required">*</b></span><input name="revision_date" type="date" required min="1900-01-01" max="9999-12-31" value="${mode==='edit'?esc(original.revision_date):today()}"></label><label class="field"><span>담당자 <b class="required">*</b></span><input name="manager" required maxlength="100" value="${esc(original?.manager||'')}" placeholder="담당자 이름 또는 부서"></label><label class="field wide"><span>참조 문서번호<span class="counter" data-counter-for="editor-approval">0 / 10</span></span><input name="approval_no" id="editor-approval" maxlength="10" value="${mode==='edit'?esc(original.approval_no):''}" placeholder="최대 10자"></label><label class="field wide"><span>설명<span class="counter" data-counter-for="editor-summary">0 / 300</span></span><textarea name="summary" id="editor-summary" maxlength="300" placeholder="문서에 대한 설명을 입력하세요.">${mode==='edit'?esc(original.summary):''}</textarea></label><section class="field wide"><span>첨부파일<span class="counter" id="file-count">0 / 20</span></span>${mode==='append'?'<small class="history-note">기존 첨부파일은 이전 이력에 보관됩니다. 이번 개정의 파일을 첨부해 주세요.</small>':''}<label class="file-drop" id="file-drop">${icon('upload')}파일을 선택하거나 이곳에 끌어 놓으세요<small>여러 파일 첨부 가능 · 파일당 20MB · 한 번에 총 40MB</small><input type="file" id="editor-files" multiple aria-label="첨부파일 선택"></label><div id="editor-file-list"></div></section><section class="field wide"><span>연관문서<span class="counter" id="relation-count">연결 없음</span></span><small>같은 업무구분의 반대편 기관 문서 1개를 선택합니다. 이미 다른 문서와 연결된 문서는 표시되지 않습니다.</small><div id="selected-relations" class="selected-relations"></div><div class="relation-picker"><div class="relation-picker-search single"><input id="reference-query" placeholder="연관문서의 문서명으로 찾기" aria-label="연관문서 검색"></div><div id="reference-options" class="relation-picker-results"><div class="no-options">연관문서를 불러오고 있습니다.</div></div></div></section></div></div><div class="dialog-foot"><button type="button" class="btn" data-action="close-editor">취소</button><button type="submit" class="btn primary" id="save-revision">${icon('check')}${mode==='edit'?'수정 저장':'등록'}</button></div></form>`;
+  $('#editor-dialog').innerHTML=`<div class="dialog-head"><div><h2 id="editor-heading">${label}</h2><p>${mode==='new'?'새 문서의 최초 제정 이력을 등록합니다.':mode==='append'?'기존 문서에 새로운 개정 이력을 이어서 등록합니다.':'선택한 이력의 정보와 첨부파일, 연관문서를 수정합니다.'}</p></div><button class="close-button" data-action="close-editor" aria-label="닫기">${icon('close')}</button></div><form id="revision-form"><div class="dialog-body"><div id="editor-error" class="error-box hidden" role="alert"></div><div class="form-grid document-form"><label class="field document-classification"><span>업무구분 <b class="required">*</b></span><select name="category_id" id="editor-category" required>${categoryOptions(category)}</select></label><label class="field document-classification"><span>기관 구분 <b class="required">*</b></span><select name="organization_id" id="editor-org" required>${SIDES.map(o=>`<option value="${o.id}" ${org===o.id?'selected':''}>${esc(o.name)}</option>`).join('')}</select></label><label class="field document-classification"><span>문서종류 <b class="required">*</b></span><select name="document_type" id="editor-document-type" required>${DOCUMENT_TYPES.map(type=>`<option value="${type}" ${documentType===type?'selected':''}>${type}</option>`).join('')}</select></label>${mode==='edit'?'<div class="notice-box wide">기관 구분·문서종류·업무구분·연관문서 변경은 문서 전체에 반영됩니다.</div>':''}<label class="field wide"><span>문서명 <b class="required">*</b><span class="counter" data-counter-for="editor-title">0 / 50</span></span><input id="editor-title" name="title" required maxlength="50" value="${esc(original?.title||'')}" placeholder="예: 개인정보 보호 내부관리계획"></label><label class="field"><span>제·개정 일자 <b class="required">*</b></span><input name="revision_date" type="date" required min="1900-01-01" max="9999-12-31" value="${mode==='edit'?esc(original.revision_date):today()}"></label><label class="field"><span>담당자 <b class="required">*</b></span><input name="manager" required maxlength="100" value="${esc(original?.manager||'')}" placeholder="담당자 이름 또는 부서"></label><label class="field wide"><span>참조 문서번호<span class="counter" data-counter-for="editor-approval">0 / 10</span></span><input name="approval_no" id="editor-approval" maxlength="10" value="${mode==='edit'?esc(original.approval_no):''}" placeholder="최대 10자"></label><label class="field wide"><span>설명<span class="counter" data-counter-for="editor-summary">0 / 300</span></span><textarea name="summary" id="editor-summary" maxlength="300" placeholder="문서에 대한 설명을 입력하세요.">${mode==='edit'?esc(original.summary):''}</textarea></label><section class="field wide"><span>첨부파일<span class="counter" id="file-count">0 / 20</span></span>${mode==='append'?'<small class="history-note">기존 첨부파일은 이전 이력에 보관됩니다. 이번 개정의 파일을 첨부해 주세요.</small>':''}<label class="file-drop" id="file-drop">${icon('upload')}파일을 선택하거나 이곳에 끌어 놓으세요<small>여러 파일 첨부 가능 · 파일당 20MB · 한 번에 총 40MB</small><input type="file" id="editor-files" multiple aria-label="첨부파일 선택"></label><div id="editor-file-list"></div></section><section class="field wide"><span>연관문서<span class="counter" id="relation-count">연결 없음</span></span><small>같은 업무구분의 반대편 기관 문서 1개를 선택합니다. 이미 다른 문서와 연결된 문서는 표시되지 않습니다.</small><div id="selected-relations" class="selected-relations"></div><div class="relation-picker"><div class="relation-picker-search single"><input id="reference-query" placeholder="연관문서의 문서명으로 찾기" aria-label="연관문서 검색"></div><div id="reference-options" class="relation-picker-results"><div class="no-options">연관문서를 불러오고 있습니다.</div></div></div></section></div></div><div class="dialog-foot"><button type="button" class="btn" data-action="close-editor">취소</button><button type="submit" class="btn primary" id="save-revision">${icon('check')}${mode==='edit'?'수정 저장':'등록'}</button></div></form>`;
   $('#editor-dialog').showModal();document.body.classList.add('dialog-open');renderEditorFiles();renderSelectedRefs();updateCounters();loadReferences();
   $('#editor-category').focus();
 }
@@ -162,6 +215,12 @@ document.addEventListener('click',async event=>{
   event.preventDefault();const {action,id}=target.dataset;
   try{switch(action){
     case 'home':await resetSearch();break;
+    case 'users':if(location.hash==='#users')await handleRoute();else location.hash='#users';break;
+    case 'add-user':openUserEditor();break;
+    case 'edit-user':openUserEditor(id);break;
+    case 'delete-user':await removeUser(id);break;
+    case 'change-password':openPasswordEditor();break;
+    case 'close-user':if(!state.userEditor?.busy)$('#user-dialog').close();break;
     case 'back':navigate();break;
     case 'menu':$('.sidebar')?.classList.toggle('open');break;
     case 'new':openEditor('new');break;
@@ -186,7 +245,7 @@ document.addEventListener('click',async event=>{
     case 'delete-revision':await removeRevision(id,target.dataset.documentId);break;
     case 'delete-document':await removeDocument(target.dataset.documentId);break;
     case 'confirm-no':case 'confirm-yes':{const resolve=confirmResolve;confirmResolve=null;$('#confirm-dialog').close();resolve?.(action==='confirm-yes');break;}
-    case 'logout':await api('/api/logout',{method:'POST'});state.authenticated=false;renderLogin();break;
+    case 'logout':await api('/api/logout',{method:'POST'});state.authenticated=false;state.user=null;state.users=[];renderLogin();break;
   }}catch(e){notify(e.message);}
 });
 document.addEventListener('submit',async event=>{
@@ -194,6 +253,8 @@ document.addEventListener('submit',async event=>{
   if(form.id==='login-form'){const button=form.querySelector('button');button.disabled=true;showError('#login-error','');try{await api('/api/login',{method:'POST',json:Object.fromEntries(new FormData(form))});state.authenticated=true;await reloadAll();await handleRoute();}catch(e){showError('#login-error',e.message);button.disabled=false;}}
   else if(form.id==='search-form'){state.search=Object.fromEntries(new FormData(form));await refreshList();}
   else if(form.id==='revision-form')await saveEditor(form);
+  else if(form.id==='user-form')await saveUser(form);
+  else if(form.id==='password-form')await saveOwnPassword(form);
   else if(form.id==='category-add-form')await saveCategory(form);
   else if(form.dataset.categoryEdit)await saveCategory(form,form.dataset.categoryEdit);
 });
@@ -211,6 +272,8 @@ $('#editor-dialog').addEventListener('cancel',event=>{if(state.editor?.busy)even
 $('#editor-dialog').addEventListener('close',()=>{if(!state.editor?.busy)state.editor=null;if(!document.querySelector('dialog[open]'))document.body.classList.remove('dialog-open');});
 $('#category-dialog').addEventListener('close',()=>{if(!document.querySelector('dialog[open]'))document.body.classList.remove('dialog-open');});
 $('#confirm-dialog').addEventListener('close',()=>{if(confirmResolve){confirmResolve(false);confirmResolve=null;}});
+$('#user-dialog')?.addEventListener('cancel',event=>{if(state.userEditor?.busy)event.preventDefault();});
+$('#user-dialog')?.addEventListener('close',()=>{if(!state.userEditor?.busy)state.userEditor=null;if(!document.querySelector('dialog[open]'))document.body.classList.remove('dialog-open');});
 window.addEventListener('hashchange',handleRoute);
 async function start(){try{const session=await api('/api/session');if(!session.authenticated){renderLogin('',session.configured,session.username);return;}state.authenticated=true;await reloadAll();await handleRoute();}catch(e){if(state.authenticated){state.loading=false;state.error=e.message;render();}else renderLogin(e.message);}}
 start();

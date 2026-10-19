@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { pbkdf2Sync } from 'node:crypto';
+import { pbkdf2Sync, createHash } from 'node:crypto';
 import { Miniflare, FormData } from 'miniflare';
 const password='local-test-password-only',origin='https://document-hub.test';
 const hash='pbkdf2$100000$integration-salt$'+pbkdf2Sync(password,'integration-salt',100000,32,'sha256').toString('hex');
@@ -19,7 +19,7 @@ const form=(side,category,title='정보보안 업무지침',extra={})=>({organiz
 const save=(path,data,files=[],method='POST')=>req(path,{method,data,files});
 const document=async id=>ok(await req('/api/documents/'+id));
 const edit=async (bundle,extra={},files=[])=>{
- const r=bundle.revisions[0];return save('/api/revisions/'+r.id,form(bundle.document.organization_id,bundle.document.category_id,r.title,{revision_date:r.revision_date,summary:r.summary,manager:r.manager,approval_no:r.approval_no,token:r.token,related_document_id:bundle.related_document_id,keep_attachments:r.attachments.map(a=>a.id),...extra}),files,'PUT');
+ const r=bundle.revisions[0];return save('/api/revisions/'+r.id,form(bundle.document.organization_id,bundle.document.category_id,r.title,{revision_date:r.revision_date,summary:r.summary,manager:r.manager,approval_no:r.approval_no,document_type:bundle.document.document_type,token:r.token,related_document_id:bundle.related_document_id,keep_attachments:r.attachments.map(a=>a.id),...extra}),files,'PUT');
 };
 async function migrate(name){const sql=await readFile('migrations/'+name,'utf8');await db.batch(sql.split(/;\s*\n/).map(s=>s.trim()).filter(Boolean).map(sql=>db.prepare(sql)));}
 test('문서관리: 고정 구분·1:1 연결·기관별 비교 표 통합 검증',async t=>{
@@ -63,6 +63,15 @@ test('문서관리: 고정 구분·1:1 연결·기관별 비교 표 통합 검�
   assert.equal(await (await bucket.get('legacy-child-key')).text(),'child-file');assert.equal(await (await bucket.get('legacy-key')).text(),'legacy-file-body');
   assert.deepEqual((await db.prepare('SELECT kwwa_id,upper_id FROM document_pairs').all()).results,[{kwwa_id:'old-a1',upper_id:'old-b1'}]);
   assert.deepEqual((await db.prepare('PRAGMA foreign_key_check').all()).results,[]);
+ });
+ await t.test('문서종류·사용자 구조 전환과 기존 문서 및 파일 보존',async()=>{
+  const before=(await db.prepare('SELECT id,organization_id,category_id,created_at FROM documents ORDER BY id').all()).results;
+  const legacyToken='a'.repeat(64);await db.prepare('INSERT INTO sessions VALUES(?,?)').bind(createHash('sha256').update(legacyToken).digest('hex'),Date.now()+60000).run();
+  await migrate('0004_document_types_and_users.sql');
+  assert.deepEqual((await db.prepare('SELECT id,organization_id,category_id,created_at FROM documents ORDER BY id').all()).results,before);
+  assert.equal((await db.prepare("SELECT count(*) n FROM documents WHERE document_type<>'지침'").first()).n,0);
+  assert.equal((await db.prepare('SELECT count(*) n FROM revisions').first()).n,5);assert.equal((await db.prepare('SELECT count(*) n FROM attachments').first()).n,2);
+  cookie='__Host-doc_session='+legacyToken;assert.equal(ok(await req('/api/session')).authenticated,false);cookie='';
  });
  let privacy,security,parent,child,upperA,upperB,assocA,assocB,raceTarget;
  await t.test('로그인·세션·출처 검사',async()=>{
@@ -294,6 +303,119 @@ test('문서관리: 고정 구분·1:1 연결·기관별 비교 표 통합 검�
   for(const fields of [{title:'한'.repeat(51)},{summary:'한'.repeat(301)},{approval_no:'가'.repeat(11)},{revision_date:'2026-02-30'},{manager:''}])assert.equal((await save('/api/documents',form('kwwa',privacy,'오류 문서',fields))).status,400);
   assert.equal((await req('/api/categories/'+privacy,{method:'DELETE'})).status,409);
  });
+ await t.test('문서종류 기본값·네 가지 종류 정렬·같은 종류의 날짜 내림차순·연결 행 기준',async()=>{
+  const category=ok(await req('/api/categories',{method:'POST',data:{name:'문서종류 검증'}}),201).id,created=[];
+  const add=async(title,type,date,extra={})=>{
+   const result=ok(await save('/api/documents',form('kwwa',category,title,{...(type?{document_type:type}:{}),revision_date:date,...extra}),[['종류.pdf','type-file']]),201);created.push(result);return result;
+  };
+  const other=await add('기타 문서','기타','2030-01-01');
+  const guide=await add('가이드라인 문서','가이드라인','2027-01-01');
+  const upper=ok(await save('/api/documents',form('upper',category,'상위기관 다른 종류',{document_type:'기타',revision_date:'2099-12-31'})),201);created.push(upper);
+  const manualOld=await add('매뉴얼 이전','매뉴얼','2020-01-01',{related_document_id:upper.document_id});
+  const guidelineOld=await add('지침 이전','지침','2025-01-01');
+  const defaultType=await add('기본 종류',null,'2024-01-01');
+  const manualNew=await add('매뉴얼 최근','매뉴얼','2026-01-01');
+  const guidelineNew=await add('지침 최근','지침','2026-01-01');
+  const list=ok(await req('/api/documents?category='+category));
+  assert.deepEqual(list.rows.map(row=>(row.kwwa||row.upper).id),[guidelineNew,guidelineOld,defaultType,manualNew,manualOld,guide,other].map(d=>d.document_id));
+  assert.equal(list.rows.find(row=>row.kwwa?.id===manualOld.document_id).upper.document_type,'기타');
+  assert.equal((await document(defaultType.document_id)).document.document_type,'지침');
+  assert.deepEqual(ok(await req('/api/bootstrap')).document_types,['지침','매뉴얼','가이드라인','기타']);
+  for(const document_type of ['규정','',null,42])assert.equal((await save('/api/documents',form('kwwa',category,'잘못된 종류',{document_type}))).status,400);
+  await assert.rejects(db.prepare("UPDATE documents SET document_type='규정' WHERE id=?").bind(other.document_id).run());
+  const original=await document(manualOld.document_id),file=original.revisions[0].attachments[0];
+  ok(await save('/api/documents/'+manualOld.document_id+'/revisions',form('kwwa',category,'기존 양식 개정',{related_document_id:upper.document_id})),201);
+  let changed=await document(manualOld.document_id);assert.equal(changed.document.document_type,'매뉴얼');assert.equal(changed.revisions.length,2);
+  ok(await edit(changed,{document_type:'가이드라인'}));
+  changed=await document(manualOld.document_id);assert.equal(changed.document.document_type,'가이드라인');assert.equal(changed.revisions.length,2);assert.equal(changed.related_document_id,upper.document_id);
+  assert.equal((await req('/api/files/'+file.id)).body,'type-file');
+  const options=ok(await req('/api/references?'+new URLSearchParams({exclude_org:'upper',category,document:upper.document_id}))).documents;
+  assert.equal(options.find(d=>d.id===manualOld.document_id).document_type,'가이드라인');
+  for(const item of created){const current=await document(item.document_id);ok(await req('/api/documents/'+item.document_id,{method:'DELETE',data:{token:current.revisions[0].token}}));}
+  ok(await req('/api/categories/'+category,{method:'DELETE'}));
+ });
+ const userPassword='member-initial-password',changedPassword='member-changed-password',resetPassword='member-reset-password';
+ const signIn=async(username,secret,ip='203.0.113.10')=>{
+  const result=await req('/api/login',{method:'POST',data:{username,password:secret},headers:{'CF-Connecting-IP':ip}});ok(result);return {cookie:result.headers.get('Set-Cookie').split(';')[0],user:result.body.user};
+ };
+ const as=(session,path,options={})=>req(path,{...options,headers:{...options.headers,Cookie:session}});
+ const accounts=async()=>ok(await req('/api/users')).users;
+ const account=async id=>(await accounts()).find(user=>user.id===id);
+ const changeAccount=async(user,extra)=>req('/api/users/'+user.id,{method:'PUT',data:{...user,...extra}});
+ let memberId;
+ await t.test('관리자 전체 사용자 목록·마스킹·추가·모든 계정정보 수정·중복 및 동시 변경 보호',async()=>{
+  const root=ok(await req('/api/me')).user;assert.equal(root.login_id,'admin');assert.equal(root.is_admin,true);assert.ok(root.last_login_at);
+  const created=ok(await req('/api/users',{method:'POST',data:{login_id:'member',password:userPassword,name:'일반 사용자',active:true,is_admin:true,last_login_at:'2026-01-02T03:04:05+09:00'}}),201);memberId=created.id;
+  let member=await account(memberId);assert.equal(member.is_admin,false);assert.equal(member.password_mask,'********');assert.equal(member.last_login_at,'2026-01-01T18:04:05.000Z');
+  assert.equal((await accounts()).length,2);
+  const safe=JSON.stringify([await accounts(),ok(await req('/api/bootstrap')),ok(await req('/api/session'))]);
+  assert.doesNotMatch(safe,/password_hash|pbkdf2\$|member-initial-password|local-test-password-only/);
+  const stored=await db.prepare('SELECT password_hash FROM users WHERE id=?').bind(memberId).first();assert.match(stored.password_hash,/^pbkdf2\$100000\$/);assert.notEqual(stored.password_hash,userPassword);
+  for(const data of [{login_id:'MEMBER',password:userPassword,name:'중복'}, {login_id:'admin',password:userPassword,name:'관리자 중복'}])assert.equal((await req('/api/users',{method:'POST',data})).status,409);
+  for(const extra of [{name:''},{login_id:''},{active:'true'},{password:'short'},{password:'a'.repeat(257)},{last_login_at:'not-a-date'},{last_login_at:'2026-02-30T00:00:00Z'}])assert.equal((await changeAccount(member,extra)).status,400);
+  ok(await changeAccount(member,{name:'사용자 수정',password:'',last_login_at:null}));
+  assert.equal((await changeAccount(member,{name:'오래된 수정'})).status,409);
+  member=await account(memberId);assert.equal(member.name,'사용자 수정');assert.equal(member.last_login_at,null);
+  assert.equal((await db.prepare('SELECT password_hash FROM users WHERE id=?').bind(memberId).first()).password_hash,stored.password_hash);
+  const concurrent=await Promise.all(['동시 수정 A','동시 수정 B'].map(name=>changeAccount(member,{name})));assert.deepEqual(concurrent.map(r=>r.status).sort(),[200,409]);
+ });
+ await t.test('일반 사용자는 본인 정보만 조회하고 사용자 관리 API·권한 승격은 차단',async()=>{
+  const session=await signIn('MEMBER',userPassword),own=ok(await as(session.cookie,'/api/me')).user;
+  assert.equal(own.id,memberId);assert.equal(own.is_admin,false);assert.ok(Date.parse(own.last_login_at)>=Date.now()-10000);
+  const bootstrap=ok(await as(session.cookie,'/api/bootstrap'));assert.equal(bootstrap.user.id,memberId);assert.equal('users' in bootstrap,false);
+  assert.equal(ok(await as(session.cookie,'/api/session')).user.id,memberId);
+  const root=(await accounts()).find(user=>user.is_admin);
+  for(const [path,method] of [['/api/users','GET'],['/api/users','POST'],['/api/users/'+memberId,'PUT'],['/api/users/'+memberId,'DELETE'],['/api/users/'+root.id,'GET'],['/api/users/'+root.id,'PUT']])assert.equal((await as(session.cookie,path,{method,data:method==='GET'?undefined:{...own,is_admin:true,password:userPassword}})).status,403);
+  assert.equal((await account(memberId)).is_admin,false);assert.equal((await account(root.id)).login_id,'admin');
+ });
+ await t.test('본인 비밀번호 검증·변경·대상 계정 위조 차단·모든 기존 세션 폐기',async()=>{
+  const one=await signIn('member',userPassword),two=await signIn('member',userPassword);
+  const root=(await accounts()).find(user=>user.is_admin),rootHash=(await db.prepare('SELECT password_hash FROM users WHERE id=?').bind(root.id).first()).password_hash;
+  assert.equal((await as(one.cookie,'/api/me/password',{method:'PUT',data:{current_password:'incorrect',new_password:changedPassword}})).status,400);
+  assert.equal((await as(one.cookie,'/api/me/password',{method:'PUT',data:{current_password:userPassword,new_password:'short'}})).status,400);
+  assert.equal(ok(await as(two.cookie,'/api/me/password',{method:'PUT',data:{id:root.id,current_password:userPassword,new_password:changedPassword}})).reauthenticate,true);
+  for(const old of [one.cookie,two.cookie]){assert.equal((await as(old,'/api/me')).status,401);assert.equal(ok(await as(old,'/api/session')).authenticated,false);}
+  assert.equal((await db.prepare('SELECT password_hash FROM users WHERE id=?').bind(root.id).first()).password_hash,rootHash);
+  assert.equal((await req('/api/login',{method:'POST',data:{username:'member',password:userPassword},headers:{'CF-Connecting-IP':'203.0.113.11'}})).status,401);
+  assert.equal((await signIn('member',changedPassword)).user.id,memberId);
+ });
+ await t.test('관리자 ID·비밀번호 초기화 및 비활성화는 접근 차단하고 재활성화 후 새 로그인만 허용',async()=>{
+  const old=await signIn('member',changedPassword);
+  ok(await changeAccount(await account(memberId),{login_id:'renamed-member',password:resetPassword,name:'최종 이름',last_login_at:'2026-09-01T10:20:00+09:00'}));
+  assert.equal((await as(old.cookie,'/api/documents')).status,401);
+  assert.equal((await req('/api/login',{method:'POST',data:{username:'member',password:changedPassword},headers:{'CF-Connecting-IP':'203.0.113.12'}})).status,401);
+  const renamed=await signIn('renamed-member',resetPassword);assert.equal(renamed.user.name,'최종 이름');
+  ok(await changeAccount(await account(memberId),{active:false}));assert.equal((await as(renamed.cookie,'/api/me')).status,401);
+  assert.equal((await req('/api/login',{method:'POST',data:{username:'renamed-member',password:resetPassword},headers:{'CF-Connecting-IP':'203.0.113.13'}})).status,401);
+  ok(await changeAccount(await account(memberId),{active:true}));assert.equal((await as(renamed.cookie,'/api/me')).status,401);
+  assert.equal((await signIn('renamed-member',resetPassword)).user.active,true);
+ });
+ await t.test('사용자 삭제는 세션만 함께 정리하며 문서는 보존하고 관리자 삭제·비활성화는 보호',async()=>{
+  const session=await signIn('renamed-member',resetPassword),member=await account(memberId);
+  const before=(await db.prepare('SELECT count(*) n FROM documents').first()).n;
+  assert.equal((await req('/api/users/'+memberId,{method:'DELETE',data:{token:'stale'}})).status,409);
+  ok(await req('/api/users/'+memberId,{method:'DELETE',data:{token:member.token}}));
+  assert.equal((await as(session.cookie,'/api/me')).status,401);assert.equal((await db.prepare('SELECT count(*) n FROM user_sessions WHERE user_id=?').bind(memberId).first()).n,0);
+  assert.equal((await db.prepare('SELECT count(*) n FROM documents').first()).n,before);
+  const root=(await accounts()).find(user=>user.is_admin);
+  assert.equal((await req('/api/users/'+root.id,{method:'DELETE',data:{token:root.token}})).status,409);
+  assert.equal((await changeAccount(root,{active:false})).status,409);
+  await assert.rejects(db.prepare('DELETE FROM users WHERE id=?').bind(root.id).run());
+  await assert.rejects(db.prepare('UPDATE users SET active=0 WHERE id=?').bind(root.id).run());
+  await assert.rejects(db.prepare('UPDATE users SET is_admin=0 WHERE id=?').bind(root.id).run());
+ });
+ await t.test('관리자 자신의 ID·비밀번호 변경 뒤 재배포용 점검에서도 계정과 변경 비밀번호 유지',async()=>{
+  const root=(await accounts()).find(user=>user.is_admin),oldCookie=cookie,newPassword='admin-changed-password';
+  assert.equal(ok(await changeAccount(root,{login_id:'renamed-admin',name:'변경 관리자',password:newPassword})).reauthenticate,true);
+  assert.equal((await as(oldCookie,'/api/users')).status,401);
+  const health=ok(await req('/api/health'));assert.equal(health.ready,true);assert.equal(health.account_management,true);
+  assert.equal((await db.prepare('SELECT count(*) n FROM users WHERE is_admin=1').first()).n,1);
+  assert.equal((await req('/api/login',{method:'POST',data:{username:'admin',password},headers:{'CF-Connecting-IP':'203.0.113.14'}})).status,401);
+  cookie=(await signIn('renamed-admin',newPassword)).cookie;
+  assert.equal(ok(await req('/api/me')).user.name,'변경 관리자');
+  assert.equal(ok(await changeAccount(await account(root.id),{login_id:'admin',name:'관리자',password})).reauthenticate,true);
+  cookie=(await signIn('admin',password)).cookie;
+ });
  await t.test('로그아웃·첨부 접근 제한·로그인 실패 제한',async()=>{
   const file=(await document(assocA.document_id)).revisions.at(-1).attachments[0];
   ok(await req('/api/logout',{method:'POST'}));cookie='';assert.equal((await req('/api/documents')).status,401);assert.equal((await req('/api/files/'+file.id)).status,401);
@@ -309,22 +431,32 @@ test('등록 화면 순서·첫 업무구분 기본값·명칭·연월 검색 �
  elements.get('#editor-org').value='kwwa';elements.get('#editor-category').value='first-work';
  const document={querySelector:id=>elements.get(id),querySelectorAll:()=>[],addEventListener:(name,fn)=>handlers.set(name,fn),body:{classList:{add(){},remove(){}}}};
  const source=await readFile('public/app.js','utf8');assert.match(source,/\nstart\(\);\s*$/);
- const app=new Function('document','window','fetch','setTimeout','clearTimeout',source.replace(/\nstart\(\);\s*$/,'\nreturn {state,openEditor,listView,queryString,resetSearch};'))(document,{addEventListener(){}},async()=>({ok:true,json:async()=>({documents:[],rows:[]})}),()=>0,()=>{});
+ const app=new Function('document','window','fetch','setTimeout','clearTimeout',source.replace(/\nstart\(\);\s*$/,'\nreturn {state,openEditor,listView,queryString,resetSearch,documentList,typeIcon};'))(document,{addEventListener(){}},async()=>({ok:true,json:async()=>({documents:[],rows:[]})}),()=>0,()=>{});
  app.state.bootstrap={categories:[{id:'first-work',name:'첫 업무',sort_order:0},{id:'other-work',name:'다른 업무',sort_order:1}],stats:{}};
  app.state.category='other-work';app.state.loading=false;app.openEditor('new');
  let html=elements.get('#editor-dialog').innerHTML;
  const selected=(html,id)=>html.match(new RegExp('<select[^>]*id="'+id+'"[^>]*>([\\s\\S]*?)</select>'))?.[1]||'';
  assert.ok(html.indexOf('id="editor-category"')<html.indexOf('id="editor-org"'));
+ assert.ok(html.indexOf('id="editor-org"')<html.indexOf('id="editor-document-type"'));
+ assert.deepEqual([...selected(html,'editor-document-type').matchAll(/<option value="([^"]+)"/g)].map(m=>m[1]),['지침','매뉴얼','가이드라인','기타']);
+ assert.match(selected(html,'editor-document-type'),/<option value="지침" selected>/);
  assert.match(selected(html,'editor-category'),/<option value="first-work" selected>/);
  assert.doesNotMatch(selected(html,'editor-category'),/업무구분 선택/);
  assert.ok(elements.get('#editor-category').focused);
  assert.ok(html.includes('참조 문서번호'));assert.ok(html.includes('<span>설명'));assert.doesNotMatch(html,/참조 결재번호|주요내용/);
  const revision={id:'existing-revision',sequence:1,title:'기존 문서',revision_date:'2026-01-30',manager:'담당',approval_no:'문서1',summary:'설명',token:'token',attachments:[]};
- app.state.detail={document:{id:'existing-document',organization_id:'upper',category_id:'other-work'},revisions:[revision],related_document_id:null};
+ app.state.detail={document:{id:'existing-document',organization_id:'upper',category_id:'other-work',document_type:'매뉴얼'},revisions:[revision],related_document_id:null};
  app.openEditor('append',null,'existing-document');html=elements.get('#editor-dialog').innerHTML;
  assert.match(selected(html,'editor-category'),/<option value="other-work" selected>/);
  assert.match(selected(html,'editor-org'),/<option value="upper" selected>/);
+ assert.match(selected(html,'editor-document-type'),/<option value="매뉴얼" selected>/);
  app.openEditor('edit','existing-revision','existing-document');assert.match(selected(elements.get('#editor-dialog').innerHTML,'editor-category'),/<option value="other-work" selected>/);
+ assert.match(selected(elements.get('#editor-dialog').innerHTML,'editor-document-type'),/<option value="매뉴얼" selected>/);
+ const icons=['지침','매뉴얼','가이드라인','기타'].map(type=>app.typeIcon(type));assert.equal(new Set(icons.map(html=>html.match(/<path d="([^"]+)/)[1])).size,4);
+ for(const [index,type] of ['지침','매뉴얼','가이드라인','기타'].entries())assert.ok(icons[index].includes('aria-label="문서종류: '+type+'"'));
+ app.state.category='';app.state.rows=[['other','기타','2099-01-01'],['old','매뉴얼','2020-01-01'],['new','매뉴얼','2026-01-01'],['first','지침','2010-01-01']].map(([id,document_type,revision_date])=>({category_id:'first-work',kwwa:{id,title:id,document_type,revision_date},upper:null}));
+ html=app.documentList();assert.deepEqual([...html.matchAll(/data-action="open" data-id="([^"]+)"/g)].map(m=>m[1]),['first','new','old','other']);
+ assert.ok(html.indexOf('document-type-icon')<html.indexOf('paired-document-name'));assert.ok(html.includes('다른 업무'));
  app.state.search={title:'',manager:'',year:'2026',month:'2'};html=app.listView();
  assert.match(html,/<input[^>]*name="year"[^>]*value="2026"/);assert.match(html,/<option value="2" selected>2월/);
  assert.doesNotMatch(html,/name="from"|name="to"|검색 시작일|검색 종료일/);
@@ -336,4 +468,42 @@ test('등록 화면 순서·첫 업무구분 기본값·명칭·연월 검색 �
  const font=body=>body.match(/font-size:([^;]+)/)?.[1],headerFont=font(rule('.paired-document-table thead th'));
  assert.ok(headerFont);assert.equal(font(rule('.paired-document-table thead tr:last-child th'))||headerFont,headerFont);
  await new Promise(setImmediate);
+});
+
+test('사용자 관리 화면의 관리자·일반 사용자 구분·마스킹·편집·시간 변환·비밀번호 변경 흐름',async()=>{
+ const elements=new Map(),requests=[];
+ const element=()=>({innerHTML:'',textContent:'',disabled:false,addEventListener(){},showModal(){},close(){},classList:{add(){},remove(){},toggle(){}}});
+ for(const id of ['#app','#editor-dialog','#category-dialog','#confirm-dialog','#user-dialog','#toast','#user-error','#save-user'])elements.set(id,element());
+ const document={querySelector:id=>elements.get(id),querySelectorAll:()=>[],addEventListener(){},body:{classList:{add(){},remove(){}}}};
+ const admin={id:'root',login_id:'admin',name:'관리자',active:true,is_admin:true,last_login_at:'2026-10-19T01:02:03.000Z',token:'root-token'};
+ const member={id:'member',login_id:'user-id',name:'<img src=x onerror=alert(1)>',active:false,is_admin:false,last_login_at:null,token:'member-token'};
+ let own=admin,fail=false;
+ const base=()=>({categories:[],stats:{},user:own});
+ const fetch=async(path,init)=>{requests.push({path,...init});return {ok:!fail,status:fail?401:200,json:async()=>fail?{error:'로그인 만료'}:path==='/api/me'?{user:own}:path==='/api/users'?{users:[admin,member]}:path==='/api/bootstrap'?base():path.startsWith('/api/documents?')?{rows:[],documents:[]}:{ok:true}};};
+ const source=await readFile('public/app.js','utf8'),location={hash:'#users'};
+ const app=new Function('document','window','fetch','setTimeout','clearTimeout','location','FormData',source.replace(/\nstart\(\);\s*$/,'\nreturn {state,loadUserList,usersView,openUserEditor,openPasswordEditor,sidebar,saveUser,saveOwnPassword,api};'))(document,{addEventListener(){}},fetch,()=>0,()=>{},location,function(form){return Object.entries(form);});
+ app.state.bootstrap=base();app.state.user=admin;app.state.authenticated=true;app.state.view='users';
+ await app.loadUserList();assert.deepEqual(requests.map(r=>r.path),['/api/me','/api/users']);
+ let html=app.usersView();assert.ok(html.includes('admin'));assert.ok(html.includes('user-id'));assert.equal((html.match(/비밀번호 마스킹/g)||[]).length,2);
+ assert.ok(html.includes('&lt;img src=x onerror=alert(1)&gt;'));assert.ok(!html.includes('<img src=x'));assert.match(html,/data-action="add-user"/);assert.match(html,/data-action="edit-user"/);assert.match(html,/data-action="delete-user" data-id="root" disabled/);
+ for(const label of ['ID','비밀번호','이름','마지막 로그인 일시','활성화 여부'])assert.ok(html.includes('>'+label+'</th>'));
+ assert.match(app.sidebar(),/<div class="sidebar-footer"><button[^>]*data-action="users"/);
+ app.openUserEditor('member');html=elements.get('#user-dialog').innerHTML;
+ for(const field of ['login_id','password','name','last_login_at','active'])assert.ok(html.includes('name="'+field+'"'));
+ assert.doesNotMatch(html,/<input name="password"[^>]*value=/);assert.ok(html.includes('비워두면 현재 비밀번호를 유지합니다.'));
+ app.openUserEditor();await app.saveUser({login_id:'new-user',password:'new-user-password',name:'새 사용자',active:'1',last_login_at:'2026-10-19T10:20'});
+ const saved=JSON.parse(requests.find(r=>r.path==='/api/users'&&r.method==='POST').body);assert.equal(saved.active,true);assert.equal(saved.last_login_at,'2026-10-19T01:20:00.000Z');
+ own={...member,active:true};app.state.user=own;app.state.users=[admin,own];requests.length=0;
+ html=app.usersView();assert.ok(html.includes('user-id'));assert.doesNotMatch(html,/>admin</);assert.doesNotMatch(html,/data-action="(?:add-user|edit-user|delete-user)"/);assert.match(html,/data-action="change-password"/);
+ await app.loadUserList();assert.deepEqual(requests.map(r=>r.path),['/api/me']);assert.equal(app.state.users.length,1);
+ app.openPasswordEditor();html=elements.get('#user-dialog').innerHTML;
+ for(const field of ['current_password','new_password','confirm_password'])assert.ok(html.includes('name="'+field+'"'));
+ assert.doesNotMatch(html,/name="(?:login_id|name|active)"/);
+ const previous=html;app.openUserEditor('member');assert.equal(elements.get('#user-dialog').innerHTML,previous);
+ requests.length=0;await app.saveOwnPassword({current_password:'old-password',new_password:'new-password-123',confirm_password:'mismatch'});assert.equal(requests.length,0);
+ await app.saveOwnPassword({current_password:'old-password',new_password:'new-password-123',confirm_password:'new-password-123'});
+ assert.equal(requests[0].path,'/api/me/password');assert.equal(requests[0].method,'PUT');assert.equal(JSON.parse(requests[0].body).new_password,'new-password-123');
+ assert.equal(app.state.authenticated,false);assert.deepEqual(app.state.users,[]);assert.equal(location.hash,'');assert.ok(elements.get('#app').innerHTML.includes('새 비밀번호로 다시 로그인'));
+ app.state.authenticated=true;app.state.user=admin;app.state.users=[admin,member];app.state.bootstrap.user=admin;fail=true;
+ await assert.rejects(app.api('/api/me'),/로그인 만료/);assert.equal(app.state.user,null);assert.equal(app.state.bootstrap.user,null);assert.deepEqual(app.state.users,[]);
 });

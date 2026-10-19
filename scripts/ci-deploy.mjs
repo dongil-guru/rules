@@ -49,33 +49,23 @@ async function ensureBucket(){
 async function verify(url){
  for(let attempt=0;attempt<6;attempt++){
   try{
-   const response=await fetch(url+'/api/health',{signal:AbortSignal.timeout(20000)});const health=await response.json();
-   if(response.ok&&health.ready){
-    const login=await fetch(url+'/api/login',{method:'POST',headers:{Origin:url,'Content-Type':'application/json'},body:JSON.stringify({username:config.vars?.ADMIN_USER||'admin',password}),signal:AbortSignal.timeout(20000)});
-    if(!login.ok)throw new Error('관리자 로그인 검사 실패');
-    const cookie=login.headers.get('Set-Cookie')?.split(';')[0];
-    if(!cookie)throw new Error('로그인 세션이 없습니다.');
-    const b=await fetch(url+'/api/bootstrap',{headers:{Cookie:cookie},signal:AbortSignal.timeout(20000)});
-    if(!b.ok)throw new Error('문서 저장소 조회 검사 실패');
-    const data=await b.json();if(!Array.isArray(data.organizations)||!Array.isArray(data.categories))throw new Error('분류 조회 결과 확인 필요');
-    if(data.categories.some(c=>'parent_id' in c||!Number.isInteger(c.sort_order)||!Number.isInteger(c.document_count)))throw new Error('1단계 업무구분 전환 확인 필요');
-    if(data.categories.some((c,index)=>index>0&&c.sort_order<data.categories[index-1].sort_order))throw new Error('업무구분 표시 순서 확인 필요');
-    if(data.organizations.length!==2||!['kwwa','upper'].every(id=>data.organizations.some(side=>side.id===id)))throw new Error('고정 기관 구분 전환 확인 필요');
-    const listResponse=await fetch(url+'/api/documents',{headers:{Cookie:cookie},signal:AbortSignal.timeout(20000)});
-    if(!listResponse.ok)throw new Error('비교 표 조회 검사 실패');
-    const list=await listResponse.json();if(!Array.isArray(list.rows))throw new Error('비교 표 형식 확인 필요');
-    const seen=new Set();
-    for(const row of list.rows){for(const side of ['kwwa','upper']){const doc=row[side];if(!doc)continue;if(doc.organization_id!==side||seen.has(doc.id))throw new Error('기관 구분 또는 중복 연결 검사 실패');seen.add(doc.id);}}
-    const document=list.rows.flatMap(row=>[row.kwwa,row.upper]).find(Boolean);
-    if(document){const response=await fetch(url+'/api/documents/'+encodeURIComponent(document.id),{headers:{Cookie:cookie},signal:AbortSignal.timeout(20000)});if(!response.ok)throw new Error('제·개정 상세 조회 검사 실패');const detail=await response.json();if(!detail.columns||!Array.isArray(detail.revisions))throw new Error('기관별 상세 정보 확인 필요');}
-    const frontend=await fetch(url+'/app.js',{signal:AbortSignal.timeout(20000)});if(!frontend.ok||!(await frontend.text()).includes('paired-document-table'))throw new Error('비교 표 화면 배포 확인 필요');
-    await fetch(url+'/api/logout',{method:'POST',headers:{Origin:url,Cookie:cookie},signal:AbortSignal.timeout(20000)});
+   const response=await fetch(url+'/api/health',{signal:AbortSignal.timeout(20000)}),health=await response.json();
+   if(response.ok&&health.ready&&health.account_management){
+    // Passwords and login IDs can now change in the site. Verify storage through
+    // the existing deployment credential without resetting any user credentials.
+    const query=await cf('/d1/database/'+config.d1_databases[0].database_id+'/query','POST',{sql:"SELECT (SELECT count(*) FROM users WHERE is_admin=1 AND active=1 AND length(password_hash)>0) administrator_count,(SELECT count(*) FROM documents WHERE document_type NOT IN ('지침','매뉴얼','가이드라인','기타')) invalid_document_types,(SELECT count(*) FROM pragma_table_info('work_categories') WHERE name='parent_id') legacy_category_columns,(SELECT count(*) FROM pragma_table_info('work_categories') WHERE name='sort_order') category_order_columns,(SELECT count(*) FROM user_sessions s LEFT JOIN users u ON u.id=s.user_id WHERE u.id IS NULL) invalid_sessions"});
+    const row=query?.[0]?.results?.[0];
+    if(!row||row.administrator_count!==1||row.invalid_document_types!==0||row.legacy_category_columns!==0||row.category_order_columns!==1||row.invalid_sessions!==0)throw new Error('운영 데이터 구조 검사 실패');
+    for(const asset of ['/app.js','/styles.css','/index.html']){
+     const frontend=await fetch(url+asset,{cache:'no-store',signal:AbortSignal.timeout(20000)});
+     if(!frontend.ok||(await frontend.text())!==readFileSync('public'+asset,'utf8'))throw new Error('최신 화면 파일 배포 확인 필요: '+asset);
+    }
     return;
    }
-  }catch{/* Allow propagation of a newly deployed Worker before checking again. */}
+  }catch{/* Allow the newly deployed Worker and storage to become available. */}
   if(attempt<5)await new Promise(resolve=>setTimeout(resolve,5000));
  }
- throw new Error('배포 후 로그인·데이터베이스 검사를 통과하지 못했습니다. Cloudflare 배포 상태를 확인해 주세요.');
+ throw new Error('배포 후 계정·데이터베이스·화면 파일 검사를 통과하지 못했습니다. Cloudflare 배포 상태를 확인해 주세요.');
 }
 try{
  await ensureDatabase();await ensureBucket();
@@ -91,6 +81,6 @@ try{
  if(!match)throw new Error('배포 주소를 확인하지 못했습니다. 위 Wrangler 배포 결과를 확인해 주세요.');
  const url=match[0];await verify(url);
  if(process.env.GITHUB_OUTPUT)appendFileSync(process.env.GITHUB_OUTPUT,'url='+url+'\n');
- if(process.env.GITHUB_STEP_SUMMARY)appendFileSync(process.env.GITHUB_STEP_SUMMARY,'## 문서관리 배포 완료\n\n[사이트 접속]('+url+')\n\n- 본인 Cloudflare Workers·D1·R2 사용\n- 로그인·고정 기관 구분·비교 표·기관별 상세 및 데이터베이스 검사 통과\n- 관리자 아이디: `admin`\n- 비밀번호: GitHub Secret `ADMIN_PASSWORD`에 본인이 등록한 값\n');
- console.log('배포 및 로그인·저장소 확인 완료: '+url);
+ if(process.env.GITHUB_STEP_SUMMARY)appendFileSync(process.env.GITHUB_STEP_SUMMARY,'## 문서관리 배포 완료\n\n[사이트 접속]('+url+')\n\n- 본인 Cloudflare Workers·D1·R2 사용\n- 계정·문서종류·업무구분 데이터 구조와 최신 화면 파일 검사 통과\n- 최초 관리자 아이디: `admin`\n- 최초 비밀번호: GitHub Secret `ADMIN_PASSWORD` 값. 이후 사이트에서 변경한 ID와 비밀번호는 유지됩니다.\n');
+ console.log('배포 및 계정·문서 저장소 확인 완료: '+url);
 }catch(error){console.error(error.message);process.exitCode=1;}
