@@ -157,15 +157,54 @@ test('문서관리: 고정 구분·1:1 연결·기관별 비교 표 통합 검�
   const rows=ok(await req('/api/documents?category='+security)).rows;assert.equal(rows.length,1);assert.equal(rows[0].upper.id,raceTarget.document_id);
   await assert.rejects(db.prepare('INSERT INTO document_pairs VALUES(?,?,?)').bind(assocB.document_id,raceTarget.document_id,'2026-10-20').run());
  });
- await t.test('개정 순번 동시성·개정 삭제 후 연결 유지·제정 삭제 보호',async()=>{
-  const base=await document(assocA.document_id);
+ await t.test('개정 순번 동시성·최신 및 최초 이력 삭제 후 연결 유지',async()=>{
   const payload=form('kwwa',privacy,'동시 개정');delete payload.related_document_id;
   const concurrent=await Promise.all([save(`/api/documents/${assocA.document_id}/revisions`,payload),save(`/api/documents/${assocA.document_id}/revisions`,payload)]);concurrent.forEach(r=>ok(r,201));
   let data=await document(assocA.document_id);assert.deepEqual(data.revisions.map(r=>r.sequence),[4,3,2,1]);
   ok(await req('/api/revisions/'+data.revisions[0].id,{method:'DELETE',data:{token:data.revisions[0].token}}));
   data=await document(assocA.document_id);assert.equal(data.related_document_id,upperB.document_id);assert.equal(data.revisions[0].sequence,3);
-  const first=data.revisions.at(-1);assert.equal((await req('/api/revisions/'+first.id,{method:'DELETE',data:{token:first.token}})).status,409);
-  assert.equal(data.revisions.at(-1).attachments.length,base.revisions.at(-1).attachments.length);
+  const first=data.revisions.at(-1),files=first.attachments;
+  const removed=ok(await req('/api/revisions/'+first.id,{method:'DELETE',data:{token:first.token}}));assert.equal(removed.document_deleted,false);
+  data=await document(assocA.document_id);assert.deepEqual(data.revisions.map(r=>r.sequence),[3,2]);assert.equal(data.related_document_id,upperB.document_id);
+  for(const file of files)assert.equal((await req('/api/files/'+file.id)).status,404);
+ });
+ await t.test('모든 순번 삭제·마지막 이력 삭제 시 문서 정리 및 상대 문서 보존',async()=>{
+  const upper=ok(await save('/api/documents',form('upper',security,'보존할 상대 문서'),[['상대.pdf','keep-partner']]),201);
+  const assoc=ok(await save('/api/documents',form('kwwa',security,'삭제할 제정',{related_document_id:upper.document_id}),[['제정.pdf','delete-first']]),201);
+  for(const title of ['중간 개정','마지막 개정'])ok(await save(`/api/documents/${assoc.document_id}/revisions`,form('kwwa',security,title,{related_document_id:upper.document_id}),[[title+'.pdf',title]]),201);
+  let data=await document(assoc.document_id);const middle=data.revisions[1],first=data.revisions.at(-1),last=data.revisions[0];
+  assert.equal((await req('/api/revisions/'+middle.id,{method:'DELETE',data:{token:'stale-token'}})).status,409);
+  assert.equal((await document(assoc.document_id)).revisions.length,3);
+  for(const revision of [middle,first]){
+   const result=ok(await req('/api/revisions/'+revision.id,{method:'DELETE',data:{token:revision.token}}));assert.equal(result.document_deleted,false);
+   for(const file of revision.attachments)assert.equal((await req('/api/files/'+file.id)).status,404);
+  }
+  data=await document(assoc.document_id);assert.deepEqual(data.revisions.map(r=>r.sequence),[3]);assert.equal(data.related_document_id,upper.document_id);
+  ok(await save(`/api/documents/${assoc.document_id}/revisions`,form('kwwa',security,'제정 삭제 후 개정',{related_document_id:upper.document_id})),201);
+  data=await document(assoc.document_id);assert.deepEqual(data.revisions.map(r=>r.sequence),[4,3]);
+  ok(await req('/api/revisions/'+data.revisions[0].id,{method:'DELETE',data:{token:data.revisions[0].token}}));
+  const removed=ok(await req('/api/revisions/'+last.id,{method:'DELETE',data:{token:last.token}}));assert.equal(removed.document_deleted,true);assert.equal(removed.document_id,assoc.document_id);
+  assert.equal((await req('/api/documents/'+assoc.document_id)).status,404);
+  for(const file of last.attachments)assert.equal((await req('/api/files/'+file.id)).status,404);
+  const survivor=await document(upper.document_id);assert.equal(survivor.related_document_id,null);assert.equal(survivor.columns.kwwa,null);assert.equal(survivor.revisions.length,1);
+  assert.equal((await req('/api/files/'+survivor.revisions[0].attachments[0].id)).body,'keep-partner');
+  const row=ok(await req('/api/documents?category='+security)).rows.find(row=>row.upper?.id===upper.document_id);assert.equal(row.kwwa,null);
+  const upperRemoved=ok(await req('/api/revisions/'+survivor.revisions[0].id,{method:'DELETE',data:{token:survivor.revisions[0].token}}));assert.equal(upperRemoved.document_deleted,true);
+  assert.equal((await req('/api/documents/'+upper.document_id)).status,404);
+  assert.ok(ok(await req('/api/bootstrap')).categories.some(c=>c.id===security));
+ });
+ await t.test('동시 삭제 및 개정 추가 경합에서 빈 문서가 남지 않음',async()=>{
+  const temp=ok(await save('/api/documents',form('kwwa',security,'동시 삭제 문서')),201);
+  ok(await save(`/api/documents/${temp.document_id}/revisions`,form('kwwa',security,'동시 삭제 개정')),201);
+  const data=await document(temp.document_id);
+  const deleted=await Promise.all(data.revisions.map(r=>req('/api/revisions/'+r.id,{method:'DELETE',data:{token:r.token}})));deleted.forEach(result=>ok(result));
+  assert.equal(deleted.filter(r=>r.body.document_deleted).length,1);assert.equal((await req('/api/documents/'+temp.document_id)).status,404);
+  const race=ok(await save('/api/documents',form('upper',security,'개정 삭제 경합')),201),original=(await document(race.document_id)).revisions[0];
+  const [removal,append]=await Promise.all([req('/api/revisions/'+original.id,{method:'DELETE',data:{token:original.token}}),save(`/api/documents/${race.document_id}/revisions`,form('upper',security,'동시에 추가된 개정'),[['경합.pdf','race-file']])]);
+  ok(removal);assert.ok([201,404,409].includes(append.status),JSON.stringify(append.body));
+  if(append.status===201){const remaining=await document(race.document_id);assert.equal(remaining.revisions.length,1);assert.equal(remaining.revisions[0].title,'동시에 추가된 개정');}
+  else assert.equal((await req('/api/documents/'+race.document_id)).status,404);
+  assert.equal((await db.prepare('SELECT count(*) n FROM documents d WHERE NOT EXISTS(SELECT 1 FROM revisions r WHERE r.document_id=d.id)').first()).n,0);
  });
  await t.test('문서 삭제 시 상대 보존·자동 연결 해제·파일 접근 차단',async()=>{
   const target=await document(upperA.document_id),file=target.revisions[0].attachments[0];

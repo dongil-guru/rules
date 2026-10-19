@@ -227,16 +227,18 @@ async function saveRevision(request,env,ctx,documentId,revisionId) {
     const result=await env.DB.batch(commands);
     if(revisionId&&result[0].meta.changes===0)fail(409,'다른 창에서 변경된 이력입니다. 새로고침 후 다시 수정해 주세요.');
     ctx.waitUntil(cleanup(env));return json({document_id:docId,revision_id:revId},revisionId?200:201);
-  }catch(e){for(const file of uploaded){try{await env.FILES.delete(file.key);}catch{}}if(/UNIQUE constraint failed: document_pairs/.test(String(e)))fail(409,'이미 다른 문서와 연결된 문서입니다. 다른 연관문서를 선택해 주세요.');throw e;}
+  }catch(e){for(const file of uploaded){try{await env.FILES.delete(file.key);}catch{}}if(/UNIQUE constraint failed: document_pairs/.test(String(e)))fail(409,'이미 다른 문서와 연결된 문서입니다. 다른 연관문서를 선택해 주세요.');if(/FOREIGN KEY constraint failed/.test(String(e)))fail(409,'문서 또는 연관문서가 변경되었거나 삭제되었습니다. 새로고침 후 다시 시도해 주세요.');throw e;}
 }
 async function deleteRevision(request,env,ctx,id) {
   const body=await readJSON(request),rev=await first(env,'SELECT * FROM revisions WHERE id=?',id);
   if(!rev)fail(404,'이력을 찾을 수 없습니다.');
   if(rev.token!==body.token)fail(409,'변경된 이력입니다. 새로고침 후 다시 시도해 주세요.');
-  if(rev.sequence===1)fail(409,'최초 제정 이력은 문서 전체 삭제에서 삭제해 주세요.');
-  const result=await stmt(env,'DELETE FROM revisions WHERE id=? AND token=?',id,body.token).run();
-  if(!result.meta.changes)fail(409,'변경된 이력입니다. 새로고침 후 다시 시도해 주세요.');
-  ctx.waitUntil(cleanup(env));return json({ok:true});
+  const result=await env.DB.batch([
+    stmt(env,'DELETE FROM revisions WHERE id=? AND token=?',id,body.token),
+    stmt(env,'DELETE FROM documents WHERE id=? AND NOT EXISTS(SELECT 1 FROM revisions WHERE document_id=documents.id)',rev.document_id)
+  ]);
+  if(!result[0].meta.changes)fail(409,'변경된 이력입니다. 새로고침 후 다시 시도해 주세요.');
+  ctx.waitUntil(cleanup(env));return json({ok:true,document_id:rev.document_id,document_deleted:result[1].meta.changes>0});
 }
 async function deleteDocument(request,env,ctx,id) {
   const body=await readJSON(request);
