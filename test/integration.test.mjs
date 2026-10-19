@@ -335,6 +335,61 @@ test('문서관리: 고정 구분·1:1 연결·기관별 비교 표 통합 검�
   for(const item of created){const current=await document(item.document_id);ok(await req('/api/documents/'+item.document_id,{method:'DELETE',data:{token:current.revisions[0].token}}));}
   ok(await req('/api/categories/'+category,{method:'DELETE'}));
  });
+ await t.test('양쪽 기관 날짜순 이력·중간 삽입·동일 날짜·차수 재계산·최신 문서 및 첨부 보존',async()=>{
+  const before=(await db.prepare('SELECT id,token FROM revisions ORDER BY id').all()).results;
+  await migrate('0006_revision_date_order.sql');assert.deepEqual((await db.prepare('SELECT id,token FROM revisions ORDER BY id').all()).results,before);
+  const category=ok(await req('/api/categories',{method:'POST',data:{name:'날짜순 이력 검증'}}),201).id;
+  const upper=ok(await save('/api/documents',form('upper',category,'상위 최신 먼저 등록',{document_type:'가이드라인',revision_date:'2030-01-01'}),[['상위-최신.pdf','upper-newest-file']]),201);
+  const assoc=ok(await save('/api/documents',form('kwwa',category,'협회 최신 먼저 등록',{document_type:'매뉴얼',revision_date:'2028-07-01',related_document_id:upper.document_id}),[['협회-최신.pdf','association-newest-file']]),201);
+  const cases=[{side:'kwwa',prefix:'협회',created:assoc,partner:upper,latestDate:'2028-07-01',type:'매뉴얼'}, {side:'upper',prefix:'상위',created:upper,partner:assoc,latestDate:'2030-01-01',type:'가이드라인'}];
+  const expectedHistory=async(id,ordered)=>{
+   const bundle=await document(id);assert.deepEqual(bundle.revisions.map(r=>r.id),ordered);
+   assert.deepEqual(bundle.revisions.map(r=>r.display_sequence),ordered.map((_,index)=>ordered.length-index));
+   assert.deepEqual(bundle.revisions.map(r=>r.revision_date),bundle.revisions.map(r=>r.revision_date).sort().reverse());return bundle;
+  };
+  const latest=async item=>{
+   const row=ok(await req('/api/documents?category='+category)).rows[0];return row[item.side];
+  };
+  for(const item of cases){
+   const {side,prefix,created,partner}=item,id=created.document_id;
+   const append=(date,title)=>save('/api/documents/'+id+'/revisions',form(side,category,title,{revision_date:date,related_document_id:partner.document_id}),[[title+'.pdf',title+'-file']]);
+   const middle=ok(await append('2024-04-01',prefix+' 중간'),201),oldest=ok(await append('2020-01-01',prefix+' 과거'),201),sameDay=ok(await append('2024-04-01',prefix+' 같은 날짜'),201);
+   let bundle=await expectedHistory(id,[created.revision_id,sameDay.revision_id,middle.revision_id,oldest.revision_id]);
+   assert.deepEqual(bundle.revisions.map(r=>r.sequence),[1,4,2,3]);assert.equal(bundle.document.document_type,item.type);assert.equal(bundle.related_document_id,partner.document_id);
+   assert.equal(bundle.revisions[0].attachments.length,1);const originalFile=bundle.revisions[0].attachments[0];
+   let newest=await latest(item);assert.equal(newest.revision_id,created.revision_id);assert.equal(newest.revision_date,item.latestDate);assert.equal(newest.display_sequence,4);assert.equal(newest.attachment_count,1);
+   const references=ok(await req('/api/references?'+new URLSearchParams({exclude_org:side==='kwwa'?'upper':'kwwa',category,document:partner.document_id}))).documents;
+   assert.equal(references.find(d=>d.id===id).revision_id,created.revision_id);assert.equal(references.find(d=>d.id===id).display_sequence,4);
+   const historical=ok(await req('/api/documents?'+new URLSearchParams({category,year:'2020'}))).documents.find(d=>d.id===id);
+   assert.equal(historical.revision_date,item.latestDate);assert.equal(historical.history_match,1);
+   // Move the last-registered oldest record above the original newest date.
+   const moved=bundle.revisions.at(-1),file=moved.attachments[0];
+   ok(await edit({...bundle,revisions:[moved]},{title:prefix+' 날짜 수정 최신',revision_date:'2040-02-02'}));
+   bundle=await expectedHistory(id,[oldest.revision_id,created.revision_id,sameDay.revision_id,middle.revision_id]);
+   assert.equal(bundle.revisions[0].attachments[0].id,file.id);assert.equal((await req('/api/files/'+file.id)).body,prefix+' 과거-file');
+   assert.equal((await edit({...bundle,revisions:[moved]},{revision_date:'2041-01-01'})).status,409);
+   assert.equal((await latest(item)).revision_id,oldest.revision_id);
+   const first=bundle.revisions.at(-1);ok(await req('/api/revisions/'+first.id,{method:'DELETE',data:{token:first.token}}));
+   bundle=await expectedHistory(id,[oldest.revision_id,created.revision_id,sameDay.revision_id]);assert.equal(bundle.revisions.at(-1).display_sequence,1);
+   // A newly registered earlier date becomes 제정; every other label advances.
+   const earlier=ok(await append('2010-01-01',prefix+' 가장 과거 추가'),201);
+   bundle=await expectedHistory(id,[oldest.revision_id,created.revision_id,sameDay.revision_id,earlier.revision_id]);
+   const removed=bundle.revisions[0];ok(await req('/api/revisions/'+removed.id,{method:'DELETE',data:{token:removed.token}}));
+   bundle=await expectedHistory(id,[created.revision_id,sameDay.revision_id,earlier.revision_id]);assert.equal((await latest(item)).revision_id,created.revision_id);assert.equal((await req('/api/files/'+file.id)).status,404);
+   const concurrent=await Promise.all([append('2015-01-01',prefix+' 동시 추가 A'),append('2015-01-01',prefix+' 동시 추가 B')]);concurrent.forEach(result=>ok(result,201));
+   bundle=await document(id);const tied=bundle.revisions.filter(r=>r.revision_date==='2015-01-01');assert.equal(tied.length,2);assert.ok(tied[0].sequence>tied[1].sequence);
+   await expectedHistory(id,[created.revision_id,sameDay.revision_id,...tied.map(r=>r.id),earlier.revision_id]);assert.equal(new Set(bundle.revisions.map(r=>r.sequence)).size,5);
+   assert.equal(bundle.revisions.find(r=>r.id===created.revision_id).attachments[0].id,originalFile.id);assert.equal((await req('/api/files/'+originalFile.id)).status,200);
+  }
+  for(const item of cases){
+   const bundle=await document(item.created.document_id),registeredLast=[...bundle.revisions].sort((a,b)=>b.sequence-a.sequence)[0];
+   assert.notEqual(bundle.revisions[0].id,registeredLast.id);
+   assert.equal((await req('/api/documents/'+item.created.document_id,{method:'DELETE',data:{token:registeredLast.token}})).status,409);
+   ok(await req('/api/documents/'+item.created.document_id,{method:'DELETE',data:{token:bundle.revisions[0].token}}));
+   if(item.side==='kwwa'){const survivor=await document(upper.document_id);assert.equal(survivor.related_document_id,null);assert.equal(survivor.revisions[0].id,upper.revision_id);}
+  }
+  ok(await req('/api/categories/'+category,{method:'DELETE'}));assert.deepEqual((await db.prepare('PRAGMA foreign_key_check').all()).results,[]);
+ });
  const userPassword='member-initial-password',changedPassword='member-changed-password',resetPassword='member-reset-password';
  const signIn=async(username,secret,ip='203.0.113.10')=>{
   const result=await req('/api/login',{method:'POST',data:{username,password:secret},headers:{'CF-Connecting-IP':ip}});ok(result);return {cookie:result.headers.get('Set-Cookie').split(';')[0],user:result.body.user};
@@ -470,7 +525,7 @@ test('등록 화면 순서·첫 업무구분 기본값·명칭·연월 검색 �
  elements.get('#editor-org').value='kwwa';elements.get('#editor-category').value='first-work';
  const document={querySelector:id=>elements.get(id),querySelectorAll:()=>[],addEventListener:(name,fn)=>handlers.set(name,fn),body:{classList:{add(){},remove(){}}}};
  const source=await readFile('public/app.js','utf8');assert.match(source,/\nstart\(\);\s*$/);
- const app=new Function('document','window','fetch','setTimeout','clearTimeout',source.replace(/\nstart\(\);\s*$/,'\nreturn {state,openEditor,listView,queryString,resetSearch,documentList,typeIcon};'))(document,{addEventListener(){}},async()=>({ok:true,json:async()=>({documents:[],rows:[]})}),()=>0,()=>{});
+ const app=new Function('document','window','fetch','setTimeout','clearTimeout',source.replace(/\nstart\(\);\s*$/,'\nreturn {state,openEditor,listView,queryString,resetSearch,documentList,typeIcon,detailView};'))(document,{addEventListener(){}},async()=>({ok:true,json:async()=>({documents:[],rows:[]})}),()=>0,()=>{});
  app.state.bootstrap={categories:[{id:'first-work',name:'첫 업무',sort_order:0},{id:'other-work',name:'다른 업무',sort_order:1}],stats:{}};
  app.state.category='other-work';app.state.loading=false;app.openEditor('new');
  let html=elements.get('#editor-dialog').innerHTML;
@@ -496,6 +551,15 @@ test('등록 화면 순서·첫 업무구분 기본값·명칭·연월 검색 �
  app.state.category='';app.state.rows=[['other','기타','2099-01-01'],['old','매뉴얼','2020-01-01'],['new','매뉴얼','2026-01-01'],['first','지침','2010-01-01']].map(([id,document_type,revision_date])=>({category_id:'first-work',kwwa:{id,title:id,document_type,revision_date},upper:null}));
  html=app.documentList();assert.deepEqual([...html.matchAll(/data-action="open" data-id="([^"]+)"/g)].map(m=>m[1]),['first','new','old','other']);
  assert.ok(html.indexOf('document-type-icon')<html.indexOf('paired-document-name'));assert.ok(html.includes('다른 업무'));
+ const history=(id,document_type)=>({document:{id,organization_id:id,category_id:'first-work',document_type},revisions:[
+  {...revision,id:id+'-new',title:'최신 <문서>',sequence:1,display_sequence:3,revision_date:'2030-01-01'},
+  {...revision,id:id+'-middle',title:'중간 문서',sequence:3,display_sequence:2,revision_date:'2025-01-01'},
+  {...revision,id:id+'-old',title:'과거 문서',sequence:2,display_sequence:1,revision_date:'2020-01-01'}
+ ],related_document_id:id==='kwwa'?'upper':'kwwa'});
+ const kwwa=history('kwwa','매뉴얼'),upper=history('upper','가이드라인');app.state.detail={...kwwa,columns:{kwwa,upper}};
+ html=app.detailView();assert.deepEqual([...html.matchAll(/<span class="badge (?:revised|enacted)">([^<]+)</g)].map(m=>m[1]),['2차 개정','1차 개정','제정','2차 개정','1차 개정','제정']);
+ assert.equal((html.match(/class="badge latest"/g)||[]).length,2);assert.equal((html.match(/aria-label="문서종류: 매뉴얼"/g)||[]).length,4);assert.equal((html.match(/aria-label="문서종류: 가이드라인"/g)||[]).length,4);
+ assert.equal((html.match(/<h4 class="revision-title"><span class="document-type-icon/g)||[]).length,6);assert.ok(html.includes('최신 &lt;문서&gt;'));assert.equal((html.match(/<time class="revision-date"/g)||[]).length,6);
  app.state.search={title:'',manager:'',year:'2026',month:'2'};html=app.listView();
  assert.match(html,/<input[^>]*name="year"[^>]*value="2026"/);assert.match(html,/<option value="2" selected>2월/);
  assert.doesNotMatch(html,/name="from"|name="to"|검색 시작일|검색 종료일/);
@@ -506,6 +570,7 @@ test('등록 화면 순서·첫 업무구분 기본값·명칭·연월 검색 �
  const css=await readFile('public/styles.css','utf8'),rule=selector=>css.slice(css.indexOf(selector+'{')+selector.length+1).split('}')[0];
  const font=body=>body.match(/font-size:([^;]+)/)?.[1],headerFont=font(rule('.paired-document-table thead th'));
  assert.ok(headerFont);assert.equal(font(rule('.paired-document-table thead tr:last-child th'))||headerFont,headerFont);
+ const primaryColor=css.match(/button\.primary,\.primary\{background:([^;]+)/)?.[1];assert.ok(primaryColor);assert.equal(rule('.revision-meta .revision-date').match(/color:([^;]+)/)?.[1],primaryColor);
  await new Promise(setImmediate);
 });
 

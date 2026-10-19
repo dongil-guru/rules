@@ -205,3 +205,8 @@ input[type=radio]{width:17px;height:17px;min-height:17px;accent-color:#147d71;fl
 .user-row-actions button:disabled{cursor:not-allowed;opacity:.4}
 .password-fields{display:grid;gap:20px}
 @media(max-width:700px){.form-grid.document-form{grid-template-columns:minmax(0,1fr)}.document-form>.field,.document-form>.field.document-classification{grid-column:1/-1}}
+
+/* Effective-date history uses the same kind icons and primary green. */
+.revision-title,.institution-document-heading h3{display:flex;align-items:flex-start;gap:9px}
+.revision-title-text{min-width:0;flex:1;overflow-wrap:anywhere}
+.revision-meta .revision-date{color:#147d71;font-weight:600}

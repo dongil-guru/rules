@@ -8,6 +8,9 @@ const json = (data, status = 200, extra = {}) => new Response(JSON.stringify(dat
 const rows = async (env, sql, ...args) => (await env.DB.prepare(sql).bind(...args).all()).results;
 const first = (env, sql, ...args) => env.DB.prepare(sql).bind(...args).first();
 const stmt = (env, sql, ...args) => env.DB.prepare(sql).bind(...args);
+// Stored sequence allocates immutable registration order. The effective date
+// determines the latest revision; sequence only breaks ties on the same date.
+const latestRevisionId = documentAlias => `(SELECT v.id FROM revisions v WHERE v.document_id=${documentAlias}.id ORDER BY v.revision_date DESC,v.sequence DESC,v.id DESC LIMIT 1)`;
 const digest = async value => [...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value)))].map(b=>b.toString(16).padStart(2,'0')).join('');
 const clean = (value, field, max, required = false) => {
   if (value != null && typeof value !== 'string') fail(400, `${field} 형식이 올바르지 않습니다.`);
@@ -205,11 +208,12 @@ async function listDocuments(url,env) {
     stmt(env,`SELECT d.id,d.organization_id,d.category_id,d.document_type,o.name organization_name,c.name category_name,c.name category_path,c.sort_order category_order,
       r.id revision_id,r.title,r.revision_date,r.summary,r.manager,r.approval_no,r.sequence,r.updated_at,
       (SELECT count(*) FROM revisions v WHERE v.document_id=d.id) revision_count,
+      (SELECT count(*) FROM revisions v WHERE v.document_id=d.id) display_sequence,
       (SELECT count(*) FROM attachments a WHERE a.revision_id=r.id) attachment_count,
       CASE WHEN ${search.sql.replaceAll('s.','r.')} THEN 0 ELSE 1 END history_match,
       p.kwwa_id,p.upper_id
       FROM documents d JOIN organizations o ON o.id=d.organization_id JOIN work_categories c ON c.id=d.category_id
-      JOIN revisions r ON r.document_id=d.id AND r.sequence=(SELECT MAX(sequence) FROM revisions WHERE document_id=d.id)
+      JOIN revisions r ON r.id=${latestRevisionId('d')}
       LEFT JOIN document_pairs p ON p.kwwa_id=d.id OR p.upper_id=d.id
       ORDER BY c.sort_order,c.id,r.revision_date DESC,d.id`,...search.args)
   ]);
@@ -230,14 +234,17 @@ async function detail(env,id) {
   const scope=`SELECT ? UNION ${partnerSql}`,args=[id,id,id,id];
   const result=await env.DB.batch([
     stmt(env,`SELECT d.*,o.name organization_name,c.name category_name FROM documents d JOIN organizations o ON o.id=d.organization_id JOIN work_categories c ON c.id=d.category_id WHERE d.id IN (${scope})`,...args),
-    stmt(env,`SELECT * FROM revisions WHERE document_id IN (${scope}) ORDER BY document_id,sequence DESC`,...args),
+    stmt(env,`SELECT * FROM revisions WHERE document_id IN (${scope}) ORDER BY document_id,revision_date DESC,sequence DESC,id DESC`,...args),
     stmt(env,`SELECT a.id,a.revision_id,a.name,a.size,a.mime,a.created_at FROM attachments a JOIN revisions r ON r.id=a.revision_id WHERE r.document_id IN (${scope}) ORDER BY a.created_at,a.name`,...args)
   ]);
   if(!result[0].results.some(d=>d.id===id))fail(404,'문서를 찾을 수 없습니다. 삭제되었을 수 있습니다.');
   const files=new Map(),revisions=new Map();
   for(const file of result[2].results){if(!files.has(file.revision_id))files.set(file.revision_id,[]);files.get(file.revision_id).push(file);}
   for(const revision of result[1].results){if(!revisions.has(revision.document_id))revisions.set(revision.document_id,[]);revisions.get(revision.document_id).push({...revision,attachments:files.get(revision.id)||[]});}
-  const bundles=result[0].results.map(document=>({document,revisions:revisions.get(document.id)||[],related_document_id:result[0].results.find(d=>d.id!==document.id)?.id||null}));
+  const bundles=result[0].results.map(document=>{
+    const history=revisions.get(document.id)||[];
+    return {document,revisions:history.map((revision,index)=>({...revision,display_sequence:history.length-index})),related_document_id:result[0].results.find(d=>d.id!==document.id)?.id||null};
+  });
   const current=bundles.find(b=>b.document.id===id),related=bundles.filter(b=>b.document.id!==id);
   return json({...current,related_documents:related,columns:{kwwa:bundles.find(b=>b.document.organization_id==='kwwa')||null,upper:bundles.find(b=>b.document.organization_id==='upper')||null}});
 }
@@ -246,10 +253,11 @@ async function references(url,env) {
   if(!['kwwa','upper'].includes(side))fail(400,'기관 구분을 먼저 선택해 주세요.');
   if(!category)fail(400,'업무구분을 먼저 선택해 주세요.');
   const q=(url.searchParams.get('q')||'').normalize('NFC').trim().slice(0,100);
-  const list=await rows(env,`SELECT d.id,d.organization_id,d.category_id,d.document_type,o.name organization_name,r.id revision_id,r.title,r.revision_date,r.sequence
+  const list=await rows(env,`SELECT d.id,d.organization_id,d.category_id,d.document_type,o.name organization_name,r.id revision_id,r.title,r.revision_date,r.sequence,
+      (SELECT count(*) FROM revisions v WHERE v.document_id=d.id) display_sequence
     FROM documents d JOIN organizations o ON o.id=d.organization_id JOIN revisions r ON r.document_id=d.id
     WHERE d.organization_id<>? AND d.category_id=? AND d.id<>?
-      AND r.sequence=(SELECT MAX(sequence) FROM revisions WHERE document_id=d.id)
+      AND r.id=${latestRevisionId('d')}
       AND instr(lower(r.title),lower(?))>0
       AND NOT EXISTS(SELECT 1 FROM document_pairs p WHERE (p.kwwa_id=d.id OR p.upper_id=d.id) AND p.kwwa_id<>? AND p.upper_id<>?)
     ORDER BY r.title COLLATE NOCASE,r.revision_date DESC LIMIT 101`,side,category,current,q,current,current);
@@ -331,7 +339,7 @@ async function deleteRevision(request,env,ctx,id) {
 }
 async function deleteDocument(request,env,ctx,id) {
   const body=await readJSON(request);
-  const result=await stmt(env,`DELETE FROM documents WHERE id=? AND EXISTS(SELECT 1 FROM revisions r WHERE r.document_id=documents.id AND r.token=? AND r.sequence=(SELECT MAX(sequence) FROM revisions WHERE document_id=documents.id))`,id,body.token||'').run();
+  const result=await stmt(env,`DELETE FROM documents WHERE id=? AND EXISTS(SELECT 1 FROM revisions r WHERE r.document_id=documents.id AND r.token=? AND r.id=${latestRevisionId('documents')})`,id,body.token||'').run();
   if(!result.meta.changes)fail(409,'문서가 변경되었거나 삭제되었습니다. 새로고침 후 다시 시도해 주세요.');
   ctx.waitUntil(cleanup(env));return json({ok:true});
 }
