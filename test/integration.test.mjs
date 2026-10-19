@@ -176,6 +176,34 @@ test('문서관리: 고정 구분·1:1 연결·기관별 비교 표 통합 검�
   assert.equal(ok(await req('/api/documents?title='+encodeURIComponent('개정된 상위'))).rows[0].kwwa.id,assocA.document_id);
   assert.equal((await req('/api/documents?from=2026-02-30')).status,400);assert.equal((await req('/api/documents?from=2026-05-01&to=2026-01-01')).status,400);
  });
+ await t.test('연도·월 검색의 연초·월말·윤년 경계와 입력값 검증',async()=>{
+  const category=ok(await req('/api/categories',{method:'POST',data:{name:'연월 검색 검증'}}),201).id;
+  const cases=[
+   ['2025-12-31','전년도말','다른담당'],['2026-01-01','올해초','검색담당'],
+   ['2026-02-28','2월말','검색담당'],['2026-03-01','3월초','다른담당'],
+   ['2026-12-31','올해말','다른담당'],['2027-01-01','다음해초','검색담당'],
+   ['2024-02-29','윤년','다른담당'],['1900-01-01','하한','다른담당'],['9999-12-31','상한','다른담당']
+  ],created=[];
+  for(const [revision_date,title,manager] of cases)created.push(ok(await save('/api/documents',form('kwwa',category,title,{revision_date,manager})),201));
+  const search=async query=>ok(await req('/api/documents?category='+category+'&'+query)).documents;
+  const dates=async query=>(await search(query)).map(d=>d.revision_date).sort();
+  assert.deepEqual(await dates('year=2026'),['2026-01-01','2026-02-28','2026-03-01','2026-12-31']);
+  assert.deepEqual(await dates('year=2026&month=2'),['2026-02-28']);
+  assert.deepEqual(await dates('year=2026&month=01'),['2026-01-01']);
+  assert.deepEqual(await dates('year=2026&month=12'),['2026-12-31']);
+  assert.deepEqual(await dates('year=2025'),['2025-12-31']);
+  assert.deepEqual(await dates('year=2024&month=2'),['2024-02-29']);
+  assert.deepEqual(await dates('year=1900&month=1'),['1900-01-01']);
+  assert.deepEqual(await dates('year=9999&month=12'),['9999-12-31']);
+  assert.equal((await search('year=&month=')).length,cases.length);
+  assert.equal((await search('year=2026&month=2&title='+encodeURIComponent('2월말')+'&manager='+encodeURIComponent('검색담당'))).length,1);
+  assert.equal((await search('year=2026&month=2&manager='+encodeURIComponent('다른담당'))).length,0);
+  for(const query of ['month=1','year=2026&month=0','year=2026&month=13','year=2026&month=1.5','year=1899','year=10000','year=26','year=abcd','year=2026.5'])assert.equal((await req('/api/documents?'+query)).status,400,query);
+  ok(await save('/api/documents/'+created[1].document_id+'/revisions',form('kwwa',category,'다음 해에 개정된 문서',{revision_date:'2027-04-15'})),201);
+  const history=await search('year=2026&month=1');assert.equal(history.length,1);assert.equal(history[0].id,created[1].document_id);assert.equal(history[0].revision_date,'2027-04-15');
+  for(const item of created){const current=await document(item.document_id);ok(await req('/api/documents/'+item.document_id,{method:'DELETE',data:{token:current.revisions[0].token}}));}
+  ok(await req('/api/categories/'+category,{method:'DELETE'}));
+ });
  await t.test('상대 문서의 모든 필드 수정·첨부 교체·오래된 토큰 보호',async()=>{
   const before=await document(upperA.document_id),old=before.revisions[0];
   ok(await edit(before,{title:'가'.repeat(50),summary:'내'.repeat(300),approval_no:'가'.repeat(10),manager:'새 담당자',revision_date:'2026-08-15',keep_attachments:[]},[['최종.pdf','final-file']]));
@@ -272,4 +300,40 @@ test('문서관리: 고정 구분·1:1 연결·기관별 비교 표 통합 검�
   for(let i=0;i<5;i++)assert.equal((await req('/api/login',{method:'POST',data:{username:'admin',password:'wrong'},headers:{'CF-Connecting-IP':'198.51.100.9'}})).status,401);
   assert.equal((await req('/api/login',{method:'POST',data:{username:'admin',password},headers:{'CF-Connecting-IP':'198.51.100.9'}})).status,429);
  });
+});
+
+test('등록 화면 순서·첫 업무구분 기본값·명칭·연월 검색 화면·표 제목 글자 크기',async()=>{
+ const handlers=new Map(),elements=new Map();
+ const element=()=>({innerHTML:'',textContent:'',value:'',required:false,disabled:false,addEventListener(){},showModal(){},focus(){this.focused=true;},classList:{add(){},remove(){},toggle(){}}});
+ for(const id of ['#app','#editor-dialog','#category-dialog','#confirm-dialog','#editor-org','#editor-category','#reference-query','#reference-options','#file-count','#editor-file-list','#selected-relations','#relation-count','#toast','#search-year'])elements.set(id,element());
+ elements.get('#editor-org').value='kwwa';elements.get('#editor-category').value='first-work';
+ const document={querySelector:id=>elements.get(id),querySelectorAll:()=>[],addEventListener:(name,fn)=>handlers.set(name,fn),body:{classList:{add(){},remove(){}}}};
+ const source=await readFile('public/app.js','utf8');assert.match(source,/\nstart\(\);\s*$/);
+ const app=new Function('document','window','fetch','setTimeout','clearTimeout',source.replace(/\nstart\(\);\s*$/,'\nreturn {state,openEditor,listView,queryString,resetSearch};'))(document,{addEventListener(){}},async()=>({ok:true,json:async()=>({documents:[],rows:[]})}),()=>0,()=>{});
+ app.state.bootstrap={categories:[{id:'first-work',name:'첫 업무',sort_order:0},{id:'other-work',name:'다른 업무',sort_order:1}],stats:{}};
+ app.state.category='other-work';app.state.loading=false;app.openEditor('new');
+ let html=elements.get('#editor-dialog').innerHTML;
+ const selected=(html,id)=>html.match(new RegExp('<select[^>]*id="'+id+'"[^>]*>([\\s\\S]*?)</select>'))?.[1]||'';
+ assert.ok(html.indexOf('id="editor-category"')<html.indexOf('id="editor-org"'));
+ assert.match(selected(html,'editor-category'),/<option value="first-work" selected>/);
+ assert.doesNotMatch(selected(html,'editor-category'),/업무구분 선택/);
+ assert.ok(elements.get('#editor-category').focused);
+ assert.ok(html.includes('참조 문서번호'));assert.ok(html.includes('<span>설명'));assert.doesNotMatch(html,/참조 결재번호|주요내용/);
+ const revision={id:'existing-revision',sequence:1,title:'기존 문서',revision_date:'2026-01-30',manager:'담당',approval_no:'문서1',summary:'설명',token:'token',attachments:[]};
+ app.state.detail={document:{id:'existing-document',organization_id:'upper',category_id:'other-work'},revisions:[revision],related_document_id:null};
+ app.openEditor('append',null,'existing-document');html=elements.get('#editor-dialog').innerHTML;
+ assert.match(selected(html,'editor-category'),/<option value="other-work" selected>/);
+ assert.match(selected(html,'editor-org'),/<option value="upper" selected>/);
+ app.openEditor('edit','existing-revision','existing-document');assert.match(selected(elements.get('#editor-dialog').innerHTML,'editor-category'),/<option value="other-work" selected>/);
+ app.state.search={title:'',manager:'',year:'2026',month:'2'};html=app.listView();
+ assert.match(html,/<input[^>]*name="year"[^>]*value="2026"/);assert.match(html,/<option value="2" selected>2월/);
+ assert.doesNotMatch(html,/name="from"|name="to"|검색 시작일|검색 종료일/);
+ const params=new URLSearchParams(app.queryString());assert.equal(params.get('year'),'2026');assert.equal(params.get('month'),'2');assert.equal(params.has('from'),false);
+ handlers.get('change')({target:{id:'search-month',value:'2',dataset:{}}});assert.equal(elements.get('#search-year').required,true);
+ handlers.get('change')({target:{id:'search-month',value:'',dataset:{}}});assert.equal(elements.get('#search-year').required,false);
+ await app.resetSearch();assert.deepEqual(app.state.search,{title:'',manager:'',year:'',month:''});
+ const css=await readFile('public/styles.css','utf8'),rule=selector=>css.slice(css.indexOf(selector+'{')+selector.length+1).split('}')[0];
+ const font=body=>body.match(/font-size:([^;]+)/)?.[1],headerFont=font(rule('.paired-document-table thead th'));
+ assert.ok(headerFont);assert.equal(font(rule('.paired-document-table thead tr:last-child th'))||headerFont,headerFont);
+ await new Promise(setImmediate);
 });

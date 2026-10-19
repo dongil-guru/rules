@@ -112,6 +112,15 @@ function searchClause(url, alias='s') {
     const val=(url.searchParams.get(param)||'').normalize('NFC').trim();
     if(val){if([...val].length>100)fail(400,'검색어는 100자 이하로 입력해 주세요.');clauses.push(`instr(lower(${alias}.${column}),lower(?))>0`);args.push(val);}
   }
+  const year=(url.searchParams.get('year')||'').trim(),month=(url.searchParams.get('month')||'').trim();
+  if(month&&!year)fail(400,'월을 검색하려면 연도를 입력해 주세요.');
+  if(year){
+    if(!/^\d{4}$/.test(year)||Number(year)<1900||Number(year)>9999)fail(400,'검색 연도는 1900~9999 사이의 4자리 숫자로 입력해 주세요.');
+    if(month&&!/^(0?[1-9]|1[0-2])$/.test(month))fail(400,'검색 월은 1~12 사이로 입력해 주세요.');
+    const firstMonth=month?String(Number(month)).padStart(2,'0'):'01',lastMonth=month?firstMonth:'12';
+    const lastDay=new Date(Date.UTC(Number(year),Number(lastMonth),0)).getUTCDate();
+    clauses.push(`${alias}.revision_date>=?`,`${alias}.revision_date<=?`);args.push(`${year}-${firstMonth}-01`,`${year}-${lastMonth}-${lastDay}`);
+  }
   for(const [param,operator] of [['from','>='],['to','<=']]) {
     const val=url.searchParams.get(param);
     if(val){validDate(val,'검색 날짜');clauses.push(`${alias}.revision_date${operator}?`);args.push(val);}
@@ -183,7 +192,7 @@ async function parsedRevision(request) {
   let form;try{form=await request.formData();}catch{fail(400,'첨부파일을 읽지 못했습니다.');}
   let data;try{data=JSON.parse(form.get('payload'));}catch{fail(400,'문서 입력값을 확인해 주세요.');}
   if(!data||typeof data!=='object')fail(400,'입력값을 확인해 주세요.');
-  const fields={title:clean(data.title,'문서명',50,true),revision_date:validDate(data.revision_date),summary:clean(data.summary,'주요내용',300),manager:clean(data.manager,'담당자',100,true),approval_no:clean(data.approval_no,'참조 결재번호',10)};
+  const fields={title:clean(data.title,'문서명',50,true),revision_date:validDate(data.revision_date),summary:clean(data.summary,'설명',300),manager:clean(data.manager,'담당자',100,true),approval_no:clean(data.approval_no,'참조 문서번호',10)};
   const organization=clean(data.organization_id,'기관',80,true),category=clean(data.category_id,'업무구분',80,true);
   if(data.relations!==undefined)fail(400,'문서 연결 방식이 변경되었습니다. 화면을 새로고침한 후 다시 저장해 주세요.');
   const keep=ids(data.keep_attachments||[],'첨부파일',20),related=clean(data.related_document_id,'연관문서',80);

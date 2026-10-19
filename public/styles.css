@@ -64,7 +64,7 @@
 .paired-document-table th,.paired-document-table td{padding:16px 18px;border-right:1px solid #e6ecef;border-bottom:1px solid #e6ecef;text-align:left;vertical-align:middle}
 .paired-document-table th:last-child,.paired-document-table td:last-child{border-right:0}
 .paired-document-table thead th{background:#edf5f2;color:#466f63;font-size:16.8px;font-weight:650;text-align:center;padding:13px 12px}
-.paired-document-table thead tr:last-child th{background:#f7faf9;font-size:14px;color:#7d938a;font-weight:500;padding:10px 8px}
+.paired-document-table thead tr:last-child th{background:#f7faf9;color:#7d938a;font-weight:500;padding:10px 8px}
 .paired-document-table .business-cell{background:#f9fbfc;font-size:16.8px;font-weight:600;color:#5c7581;overflow-wrap:anywhere}
 .paired-document-table tbody+tbody tr:first-child>*{border-top:2px solid #dce7e5}
 .paired-document-table tbody:last-child tr:last-child>*{border-bottom:0}
@@ -172,3 +172,6 @@ input[type=radio]{width:17px;height:17px;min-height:17px;accent-color:#147d71;fl
 .revision-approval strong{margin-left:0}
 .revision-approval .revision-date{margin-left:8px;white-space:nowrap}
 @media(max-width:700px){.category-row-actions{width:100%;justify-content:flex-end}}
+
+/* Separate year and month inputs share the search field typography. */
+.year-month input,.year-month select{font-size:inherit;min-width:0;flex:1 1 180px}
