@@ -1,0 +1,23 @@
+{
+  "name": "document-hub",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "check": "node --check src/worker.js && node --check public/app.js && node --check scripts/ci-deploy.mjs",
+    "test": "node --test test/integration.test.mjs",
+    "build": "node scripts/build.mjs",
+    "deploy": "wrangler deploy",
+    "db:migrate": "wrangler d1 migrations apply DB --remote",
+    "setup": "node scripts/setup.mjs",
+    "deploy:ci": "node scripts/ci-deploy.mjs"
+  },
+  "devDependencies": {
+    "miniflare": "4.20260515.0",
+    "wrangler": "4.92.0"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  }
+}
