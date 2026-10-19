@@ -21,7 +21,7 @@ const document=async id=>ok(await req('/api/documents/'+id));
 const edit=async (bundle,extra={},files=[])=>{
  const r=bundle.revisions[0];return save('/api/revisions/'+r.id,form(bundle.document.organization_id,bundle.document.category_id,r.title,{revision_date:r.revision_date,summary:r.summary,manager:r.manager,approval_no:r.approval_no,token:r.token,related_document_id:bundle.related_document_id,keep_attachments:r.attachments.map(a=>a.id),...extra}),files,'PUT');
 };
-async function migrate(name){const sql=await readFile('migrations/'+name,'utf8');for(const statement of sql.split(/;\s*\n/).map(s=>s.trim()).filter(Boolean))await db.prepare(statement).run();}
+async function migrate(name){const sql=await readFile('migrations/'+name,'utf8');await db.batch(sql.split(/;\s*\n/).map(s=>s.trim()).filter(Boolean).map(sql=>db.prepare(sql)));}
 test('문서관리: 고정 구분·1:1 연결·기관별 비교 표 통합 검증',async t=>{
  t.after(()=>mf.dispose());db=await mf.getD1Database('DB');bucket=await mf.getR2Bucket('FILES');
  await migrate('0001_initial.sql');
@@ -47,6 +47,23 @@ test('문서관리: 고정 구분·1:1 연결·기관별 비교 표 통합 검�
   assert.deepEqual(pairs,[{kwwa_id:'old-a1',upper_id:'old-b1'}]);
   assert.equal((await db.prepare("SELECT count(*) n FROM documents WHERE organization_id NOT IN ('kwwa','upper')").first()).n,0);
  });
+ await t.test('기존 하위분류를 독립 업무구분으로 전환하고 데이터·동일 이름 보존',async()=>{
+  await db.prepare('INSERT INTO work_categories VALUES(?,?,?,?)').bind('legacy-child','기존업무','legacy-cat','2026-01-02').run();
+  await db.prepare('INSERT INTO documents VALUES(?,?,?,?)').bind('legacy-child-doc','upper','legacy-child','2026-01-02').run();
+  await db.prepare('INSERT INTO revisions VALUES(?,?,1,?,?,?,?,?,?,?,?)').bind('legacy-child-rev','legacy-child-doc','하위분류 문서','2026-01-02','보존 내용','담당자','결재2','legacy-child-token','2026-01-02','2026-01-02').run();
+  await bucket.put('legacy-child-key','child-file');
+  await db.prepare('INSERT INTO attachments VALUES(?,?,?,?,?,?,?)').bind('legacy-child-file','legacy-child-rev','legacy-child-key','하위분류.pdf',10,'application/pdf','2026-01-02').run();
+  const before=(await db.prepare('SELECT id,name,created_at FROM work_categories ORDER BY id').all()).results;
+  await migrate('0003_flat_work_categories.sql');
+  assert.deepEqual((await db.prepare('SELECT id,name,created_at FROM work_categories ORDER BY id').all()).results,before);
+  const columns=(await db.prepare('PRAGMA table_info(work_categories)').all()).results.map(c=>c.name);assert.ok(!columns.includes('parent_id'));assert.ok(columns.includes('sort_order'));
+  assert.deepEqual((await db.prepare('SELECT sort_order FROM work_categories ORDER BY sort_order').all()).results.map(c=>c.sort_order),[0,1]);
+  assert.equal((await db.prepare('SELECT category_id FROM documents WHERE id=?').bind('legacy-child-doc').first()).category_id,'legacy-child');
+  assert.equal((await db.prepare('SELECT count(*) n FROM revisions').first()).n,5);assert.equal((await db.prepare('SELECT count(*) n FROM attachments').first()).n,2);
+  assert.equal(await (await bucket.get('legacy-child-key')).text(),'child-file');assert.equal(await (await bucket.get('legacy-key')).text(),'legacy-file-body');
+  assert.deepEqual((await db.prepare('SELECT kwwa_id,upper_id FROM document_pairs').all()).results,[{kwwa_id:'old-a1',upper_id:'old-b1'}]);
+  assert.deepEqual((await db.prepare('PRAGMA foreign_key_check').all()).results,[]);
+ });
  let privacy,security,parent,child,upperA,upperB,assocA,assocB,raceTarget;
  await t.test('로그인·세션·출처 검사',async()=>{
   assert.equal((await req('/api/bootstrap')).status,401);
@@ -55,18 +72,38 @@ test('문서관리: 고정 구분·1:1 연결·기관별 비교 표 통합 검�
   const login=await req('/api/login',{method:'POST',data:{username:'admin',password}});ok(login);cookie=login.headers.get('Set-Cookie').split(';')[0];assert.match(cookie,/__Host-doc_session=/);assert.match(login.headers.get('Set-Cookie'),/HttpOnly/);
   assert.equal(ok(await req('/api/session')).authenticated,true);assert.equal((await req('/')).status,200);
  });
- await t.test('고정 기관 구분 변경 차단과 업무구분 2단계 CRUD',async()=>{
+ await t.test('고정 기관 구분 변경 차단과 1단계 업무구분 등록·수정·삭제',async()=>{
   const base=ok(await req('/api/bootstrap'));assert.equal(base.organizations.length,2);
   for(const [path,method] of [['/api/organizations','POST'],['/api/organizations/kwwa','PUT'],['/api/organizations/upper','DELETE']])assert.equal((await req(path,{method,data:{name:'임의기관'}})).status,405);
   await assert.rejects(db.prepare("UPDATE organizations SET name='변경' WHERE id='kwwa'").run());
   privacy=ok(await req('/api/categories',{method:'POST',data:{name:'개인정보보호'}}),201).id;
   security=ok(await req('/api/categories',{method:'POST',data:{name:'정보보안'}}),201).id;
   parent=ok(await req('/api/categories',{method:'POST',data:{name:'법무'}}),201).id;
-  child=ok(await req('/api/categories',{method:'POST',data:{name:'내부규정',parent_id:parent}}),201).id;
-  assert.equal((await req('/api/categories',{method:'POST',data:{name:'3단계',parent_id:child}})).status,400);
+  child=ok(await req('/api/categories',{method:'POST',data:{name:'내부규정'}}),201).id;
+  assert.equal((await req('/api/categories',{method:'POST',data:{name:'하위분류',parent_id:parent}})).status,400);
   assert.equal((await req('/api/categories/'+parent,{method:'PUT',data:{name:'법무',parent_id:privacy}})).status,400);
   assert.equal((await req('/api/categories',{method:'POST',data:{name:'개인정보보호'}})).status,409);
-  const temp=ok(await req('/api/categories',{method:'POST',data:{name:'임시'}}),201).id;ok(await req('/api/categories/'+temp,{method:'DELETE'}));
+  const temp=ok(await req('/api/categories',{method:'POST',data:{name:'임시'}}),201).id;
+  ok(await req('/api/categories/'+temp,{method:'PUT',data:{name:'임시 수정'}}));assert.equal(ok(await req('/api/bootstrap')).categories.find(c=>c.id===temp).name,'임시 수정');
+  assert.equal((await req('/api/categories/'+temp,{method:'PUT',data:{name:'개인정보보호'}})).status,409);
+  ok(await req('/api/categories/'+temp,{method:'DELETE'}));assert.ok(!ok(await req('/api/bootstrap')).categories.some(c=>c.id===temp));
+  assert.ok(ok(await req('/api/bootstrap')).categories.every(c=>!('parent_id' in c)&&Number.isInteger(c.sort_order)&&Number.isInteger(c.document_count)));
+ });
+ await t.test('업무구분 순서 저장·검증·동시 변경 보호와 신규 항목 마지막 배치',async()=>{
+  let previous=ok(await req('/api/bootstrap')).categories.map(c=>c.id),ordered=[...previous].reverse();
+  ok(await req('/api/categories/order',{method:'PUT',data:{ids:ordered,previous_ids:previous}}));
+  assert.deepEqual(ok(await req('/api/bootstrap')).categories.map(c=>c.id),ordered);
+  assert.equal((await req('/api/categories/order',{method:'PUT',data:{ids:ordered,previous_ids:previous}})).status,409);
+  previous=ordered;
+  assert.equal((await req('/api/categories/order',{method:'PUT',data:{ids:previous.slice(1),previous_ids:previous}})).status,400);
+  assert.equal((await req('/api/categories/order',{method:'PUT',data:{ids:[...previous,previous[0]],previous_ids:previous}})).status,400);
+  assert.equal((await req('/api/categories/order',{method:'PUT',data:{ids:['unknown-category',...previous.slice(1)],previous_ids:previous}})).status,400);
+  const concurrent=await Promise.all([[...previous].reverse(),[...previous.slice(1),previous[0]]].map(ids=>req('/api/categories/order',{method:'PUT',data:{ids,previous_ids:previous}})));
+  assert.deepEqual(concurrent.map(r=>r.status).sort(),[200,409]);
+  const before=ok(await req('/api/bootstrap')).categories.map(c=>c.id),added=ok(await req('/api/categories',{method:'POST',data:{name:'AAA 마지막 업무'}}),201).id;
+  assert.deepEqual(ok(await req('/api/bootstrap')).categories.map(c=>c.id),[...before,added]);
+  assert.equal((await req('/api/categories/order',{method:'PUT',data:{ids:[...before].reverse(),previous_ids:before}})).status,409);
+  ok(await req('/api/categories/'+added,{method:'DELETE'}));
  });
  await t.test('문서 등록·2개 첨부파일·1개 연관문서 연결',async()=>{
   upperA=ok(await save('/api/documents',form('upper',privacy,'내부관리계획_상위',{revision_date:'2026-01-13'}),[['상위.pdf','upper-original']]),201);
@@ -75,6 +112,19 @@ test('문서관리: 고정 구분·1:1 연결·기관별 비교 표 통합 검�
   assocB=ok(await save('/api/documents',form('kwwa',privacy,'협회 가이드라인')),201);
   const data=await document(assocA.document_id);assert.equal(data.revisions[0].attachments.length,2);assert.equal(data.related_document_id,upperA.document_id);
   assert.equal((await req('/api/files/'+data.revisions[0].attachments[0].id)).status,200);
+ });
+ await t.test('등록 문서가 있는 업무구분 삭제 차단·이름 수정·사용자 지정 표 순서',async()=>{
+  const before=ok(await req('/api/bootstrap')),used=before.categories.find(c=>c.id===privacy);assert.equal(used.document_count,4);
+  assert.equal((await req('/api/categories/'+privacy,{method:'DELETE'})).status,409);
+  await assert.rejects(db.prepare('DELETE FROM work_categories WHERE id=?').bind(privacy).run());
+  ok(await req('/api/categories/'+privacy,{method:'PUT',data:{name:'개인정보 보호'}}));
+  assert.equal((await document(assocA.document_id)).document.category_name,'개인정보 보호');
+  assert.deepEqual(ok(await req('/api/bootstrap')).categories.map(c=>c.id),before.categories.map(c=>c.id));
+  ok(await req('/api/categories/'+privacy,{method:'PUT',data:{name:'개인정보보호'}}));
+  const rows=ok(await req('/api/documents')).rows,actual=[...new Set(rows.map(row=>row.category_id))];
+  assert.deepEqual(actual,ok(await req('/api/bootstrap')).categories.filter(c=>actual.includes(c.id)).map(c=>c.id));
+  const oldChild=ok(await req('/api/documents?category=legacy-child'));assert.equal(oldChild.documents.length,1);assert.equal(oldChild.documents[0].id,'legacy-child-doc');
+  assert.ok(ok(await req('/api/documents?category=legacy-cat')).documents.every(d=>d.id!=='legacy-child-doc'));
  });
  await t.test('최신 문서 비교 행·연결 없는 빈칸·중복 표시 방지',async()=>{
   const result=ok(await req('/api/documents?category='+privacy));assert.equal(result.rows.length,3);

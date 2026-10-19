@@ -160,3 +160,15 @@ input[type=radio]{width:17px;height:17px;min-height:17px;accent-color:#147d71;fl
   .login-brand{flex-wrap:wrap}
   .login-foot{align-items:flex-start}
 }
+
+/* Flat category management and approval-adjacent revision date. */
+.category-add-form.flat{grid-template-columns:minmax(0,1fr) auto}
+.category-row{flex-wrap:wrap}
+.category-row .category-name{flex:1 1 220px;min-width:0}
+.category-position{color:#8b9da7;font-variant-numeric:tabular-nums;min-width:1.5em}
+.category-row-actions{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.category-row button:disabled{cursor:not-allowed;opacity:.4}
+.revision-meta .revision-approval{display:inline-flex;align-items:baseline;gap:7px;flex-wrap:wrap}
+.revision-approval strong{margin-left:0}
+.revision-approval .revision-date{margin-left:8px;white-space:nowrap}
+@media(max-width:700px){.category-row-actions{width:100%;justify-content:flex-end}}

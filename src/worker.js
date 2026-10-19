@@ -71,31 +71,40 @@ async function login(request, env) {
 async function bootstrap(env) {
   const results = await env.DB.batch([
     stmt(env,'SELECT * FROM organizations ORDER BY name COLLATE NOCASE'),
-    stmt(env,'SELECT * FROM work_categories ORDER BY name COLLATE NOCASE'),
+    stmt(env,'SELECT c.*,(SELECT count(*) FROM documents d WHERE d.category_id=c.id) document_count FROM work_categories c ORDER BY c.sort_order,c.id'),
     stmt(env,`SELECT (SELECT count(*) FROM documents) documents, (SELECT count(*) FROM revisions) revisions, (SELECT count(*) FROM organizations) organizations, (SELECT count(DISTINCT document_id) FROM revisions WHERE updated_at>=?) recent`,new Date(Date.now()-30*86400000).toISOString())
   ]);
   return json({organizations:results[0].results,categories:results[1].results,stats:results[2].results[0]});
 }
-async function categoryMutation(request, env, kind, id) {
-  const table = kind==='organizations'?'organizations':'work_categories';
-  const existing = id ? await first(env,`SELECT * FROM ${table} WHERE id=?`,id) : null;
+async function categoryMutation(request, env, id) {
+  const existing = id ? await first(env,'SELECT * FROM work_categories WHERE id=?',id) : null;
   if (id&&!existing) fail(404,'분류를 찾을 수 없습니다.');
   if(request.method==='DELETE') {
-    try {await stmt(env,`DELETE FROM ${table} WHERE id=?`,id).run();} catch {fail(409,'사용 중인 분류입니다. 연결된 문서 또는 하위 분류를 먼저 이동하거나 삭제해 주세요.');}
+    if(await first(env,'SELECT 1 FROM documents WHERE category_id=?',id))fail(409,'등록된 문서가 있는 업무구분은 삭제할 수 없습니다. 문서를 먼저 이동하거나 삭제해 주세요.');
+    try {await stmt(env,'DELETE FROM work_categories WHERE id=?',id).run();} catch(e) {if(String(e).includes('FOREIGN KEY'))fail(409,'등록된 문서가 있는 업무구분은 삭제할 수 없습니다.');throw e;}
     return json({ok:true});
   }
   const body=await readJSON(request),name=clean(body.name,'분류명',80,true);
-  const parent=kind==='categories'?(body.parent_id||null):null;
-  if(parent) {
-    const p=await first(env,'SELECT * FROM work_categories WHERE id=?',parent);
-    if(!p||p.parent_id||parent===id)fail(400,'상위 업무구분을 확인해 주세요. 2단계까지만 등록할 수 있습니다.');
-  }
+  if(body.parent_id!=null&&body.parent_id!=='')fail(400,'업무구분은 하위분류 없이 1단계로만 등록할 수 있습니다.');
   const key=id||uid();
   try {
-    if(kind==='organizations')await (id?stmt(env,'UPDATE organizations SET name=? WHERE id=?',name,id):stmt(env,'INSERT INTO organizations VALUES(?,?,?)',key,name,now())).run();
-    else await (id?stmt(env,'UPDATE work_categories SET name=?,parent_id=? WHERE id=?',name,parent,id):stmt(env,'INSERT INTO work_categories VALUES(?,?,?,?)',key,name,parent,now())).run();
-  }catch(e){if(String(e).includes('UNIQUE'))fail(409,'동일한 이름의 분류가 있습니다.');if(String(e).includes('2단계'))fail(400,'하위 분류가 있는 업무구분은 다른 분류 아래로 옮길 수 없습니다.');throw e;}
+    await (id?stmt(env,'UPDATE work_categories SET name=? WHERE id=?',name,id):stmt(env,'INSERT INTO work_categories(id,name,created_at,sort_order) SELECT ?,?,?,COALESCE(MAX(sort_order),-1)+1 FROM work_categories',key,name,now())).run();
+  }catch(e){if(String(e).includes('UNIQUE')||String(e).includes('동일한 이름'))fail(409,'동일한 이름의 업무구분이 있습니다.');throw e;}
   return json({id:key},id?200:201);
+}
+async function reorderCategories(request,env){
+  const body=await readJSON(request),ordered=ids(body.ids,'업무구분',1000),previous=ids(body.previous_ids,'기존 업무구분',1000);
+  if(ordered.length!==body.ids.length||previous.length!==body.previous_ids.length)fail(400,'업무구분 순서에 중복된 항목이 있습니다.');
+  const current=(await rows(env,'SELECT id FROM work_categories ORDER BY sort_order,id')).map(c=>c.id);
+  if(JSON.stringify(previous)!==JSON.stringify(current))fail(409,'업무구분 목록 또는 순서가 변경되었습니다. 새로고침 후 다시 시도해 주세요.');
+  if(ordered.length!==current.length||ordered.some(id=>!current.includes(id)))fail(400,'모든 업무구분을 빠짐없이 한 번씩 지정해 주세요.');
+  if(!current.length)return json({ok:true});
+  const result=await stmt(env,`WITH before_order AS MATERIALIZED (
+    SELECT json_group_array(id) token FROM (SELECT id FROM work_categories ORDER BY sort_order,id)
+  ) UPDATE work_categories SET sort_order=(SELECT CAST(key AS INTEGER) FROM json_each(?) WHERE value=work_categories.id)
+    WHERE (SELECT token FROM before_order)=?`,JSON.stringify(ordered),JSON.stringify(previous)).run();
+  if(result.meta.changes!==current.length)fail(409,'업무구분 목록 또는 순서가 변경되었습니다. 새로고침 후 다시 시도해 주세요.');
+  return json({ok:true});
 }
 function searchClause(url, alias='s') {
   const clauses=[],args=[];
@@ -112,21 +121,19 @@ function searchClause(url, alias='s') {
 }
 async function listDocuments(url,env) {
   const search=searchClause(url),category=url.searchParams.get('category');
-  const filter=category?'AND (d.category_id=? OR c.parent_id=?)':'';
+  const filter=category?'AND d.category_id=?':'';
   const result=await env.DB.batch([
-    stmt(env,`SELECT d.id FROM documents d JOIN work_categories c ON c.id=d.category_id WHERE EXISTS(SELECT 1 FROM revisions s WHERE s.document_id=d.id AND ${search.sql}) ${filter}`,...search.args,...(category?[category,category]:[])),
-    stmt(env,`SELECT d.id,d.organization_id,d.category_id,o.name organization_name,c.name category_name,c.parent_id,
-      CASE WHEN pc.id IS NULL THEN c.name ELSE pc.name||' › '||c.name END category_path,
+    stmt(env,`SELECT d.id FROM documents d WHERE EXISTS(SELECT 1 FROM revisions s WHERE s.document_id=d.id AND ${search.sql}) ${filter}`,...search.args,...(category?[category]:[])),
+    stmt(env,`SELECT d.id,d.organization_id,d.category_id,o.name organization_name,c.name category_name,c.name category_path,c.sort_order category_order,
       r.id revision_id,r.title,r.revision_date,r.summary,r.manager,r.approval_no,r.sequence,r.updated_at,
       (SELECT count(*) FROM revisions v WHERE v.document_id=d.id) revision_count,
       (SELECT count(*) FROM attachments a WHERE a.revision_id=r.id) attachment_count,
       CASE WHEN ${search.sql.replaceAll('s.','r.')} THEN 0 ELSE 1 END history_match,
       p.kwwa_id,p.upper_id
       FROM documents d JOIN organizations o ON o.id=d.organization_id JOIN work_categories c ON c.id=d.category_id
-      LEFT JOIN work_categories pc ON pc.id=c.parent_id
       JOIN revisions r ON r.document_id=d.id AND r.sequence=(SELECT MAX(sequence) FROM revisions WHERE document_id=d.id)
       LEFT JOIN document_pairs p ON p.kwwa_id=d.id OR p.upper_id=d.id
-      ORDER BY category_path,r.revision_date DESC,d.id`,...search.args)
+      ORDER BY c.sort_order,c.id,r.revision_date DESC,d.id`,...search.args)
   ]);
   const matches=new Set(result[0].results.map(d=>d.id)),all=new Map(result[1].results.map(d=>[d.id,{...d,search_match:matches.has(d.id),history_match:matches.has(d.id)?d.history_match:0}]));
   const seen=new Set(),pairedRows=[];
@@ -135,16 +142,16 @@ async function listDocuments(url,env) {
     const kwwa=document.kwwa_id?all.get(document.kwwa_id):(document.organization_id==='kwwa'?document:null);
     const upper=document.upper_id?all.get(document.upper_id):(document.organization_id==='upper'?document:null);
     if(!matches.has(kwwa?.id)&&!matches.has(upper?.id))continue;
-    const anchor=kwwa||upper;pairedRows.push({category_id:anchor.category_id,category_path:anchor.category_path,kwwa:kwwa||null,upper:upper||null});
+    const anchor=kwwa||upper;pairedRows.push({category_id:anchor.category_id,category_path:anchor.category_path,category_order:anchor.category_order,kwwa:kwwa||null,upper:upper||null});
   }
-  pairedRows.sort((a,b)=>a.category_path.localeCompare(b.category_path,'ko')||[b.kwwa?.revision_date||'',b.upper?.revision_date||''].sort().at(-1).localeCompare([a.kwwa?.revision_date||'',a.upper?.revision_date||''].sort().at(-1))||(a.kwwa?.title||a.upper.title).localeCompare(b.kwwa?.title||b.upper.title,'ko'));
+  pairedRows.sort((a,b)=>a.category_order-b.category_order||a.category_id.localeCompare(b.category_id)||[b.kwwa?.revision_date||'',b.upper?.revision_date||''].sort().at(-1).localeCompare([a.kwwa?.revision_date||'',a.upper?.revision_date||''].sort().at(-1))||(a.kwwa?.title||a.upper.title).localeCompare(b.kwwa?.title||b.upper.title,'ko'));
   return json({rows:pairedRows,documents:pairedRows.flatMap(row=>[row.kwwa,row.upper].filter(Boolean))});
 }
 async function detail(env,id) {
   const partnerSql=`SELECT CASE WHEN kwwa_id=? THEN upper_id ELSE kwwa_id END FROM document_pairs WHERE kwwa_id=? OR upper_id=?`;
   const scope=`SELECT ? UNION ${partnerSql}`,args=[id,id,id,id];
   const result=await env.DB.batch([
-    stmt(env,`SELECT d.*,o.name organization_name,c.name category_name,c.parent_id FROM documents d JOIN organizations o ON o.id=d.organization_id JOIN work_categories c ON c.id=d.category_id WHERE d.id IN (${scope})`,...args),
+    stmt(env,`SELECT d.*,o.name organization_name,c.name category_name FROM documents d JOIN organizations o ON o.id=d.organization_id JOIN work_categories c ON c.id=d.category_id WHERE d.id IN (${scope})`,...args),
     stmt(env,`SELECT * FROM revisions WHERE document_id IN (${scope}) ORDER BY document_id,sequence DESC`,...args),
     stmt(env,`SELECT a.id,a.revision_id,a.name,a.size,a.mime,a.created_at FROM attachments a JOIN revisions r ON r.id=a.revision_id WHERE r.document_id IN (${scope}) ORDER BY a.created_at,a.name`,...args)
   ]);
@@ -265,8 +272,9 @@ async function route(request,env,ctx) {
   if(!await authorized(request,env))fail(401,'로그인이 필요합니다. 다시 로그인해 주세요.');
   if(path==='/api/logout'&&method==='POST'){await stmt(env,'DELETE FROM sessions WHERE token_hash=?',await digest(cookieValue(request))).run();return json({ok:true},200,{'Set-Cookie':sessionCookie(request,'',0)});}
   if(path==='/api/bootstrap'&&method==='GET')return bootstrap(env);
+  if(path==='/api/categories/order'&&method==='PUT')return reorderCategories(request,env);
   const category=path.match(/^\/api\/(organizations|categories)(?:\/([\w-]+))?$/);
-  if(category&&['POST','PUT','DELETE'].includes(method)){if(category[1]==='organizations')fail(405,'기관 구분은 한국상하수도협회와 상위기관으로 고정되어 있습니다.');if((method==='POST'&&category[2])||(method!=='POST'&&!category[2]))fail(405,'허용되지 않는 요청입니다.');return categoryMutation(request,env,category[1],category[2]);}
+  if(category&&['POST','PUT','DELETE'].includes(method)){if(category[1]==='organizations')fail(405,'기관 구분은 한국상하수도협회와 상위기관으로 고정되어 있습니다.');if((method==='POST'&&category[2])||(method!=='POST'&&!category[2]))fail(405,'허용되지 않는 요청입니다.');return categoryMutation(request,env,category[2]);}
   if(path==='/api/documents'&&method==='GET')return listDocuments(url,env);
   if(path==='/api/documents'&&method==='POST')return saveRevision(request,env,ctx);
   if(path==='/api/references'&&method==='GET')return references(url,env);

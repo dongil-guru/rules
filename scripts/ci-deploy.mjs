@@ -58,6 +58,8 @@ async function verify(url){
     const b=await fetch(url+'/api/bootstrap',{headers:{Cookie:cookie},signal:AbortSignal.timeout(20000)});
     if(!b.ok)throw new Error('문서 저장소 조회 검사 실패');
     const data=await b.json();if(!Array.isArray(data.organizations)||!Array.isArray(data.categories))throw new Error('분류 조회 결과 확인 필요');
+    if(data.categories.some(c=>'parent_id' in c||!Number.isInteger(c.sort_order)||!Number.isInteger(c.document_count)))throw new Error('1단계 업무구분 전환 확인 필요');
+    if(data.categories.some((c,index)=>index>0&&c.sort_order<data.categories[index-1].sort_order))throw new Error('업무구분 표시 순서 확인 필요');
     if(data.organizations.length!==2||!['kwwa','upper'].every(id=>data.organizations.some(side=>side.id===id)))throw new Error('고정 기관 구분 전환 확인 필요');
     const listResponse=await fetch(url+'/api/documents',{headers:{Cookie:cookie},signal:AbortSignal.timeout(20000)});
     if(!listResponse.ok)throw new Error('비교 표 조회 검사 실패');
