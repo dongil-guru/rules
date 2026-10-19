@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
-import { randomBytes, pbkdf2Sync, timingSafeEqual } from 'node:crypto';
 import { resolve } from 'node:path';
+import { passwordHash, inspectAdministrator, prepareAdministrator } from './admin-credentials.mjs';
 
 const required=['CLOUDFLARE_API_TOKEN','CLOUDFLARE_ACCOUNT_ID','ADMIN_PASSWORD'];
 const absent=required.filter(k=>!process.env[k]);
@@ -72,11 +72,9 @@ async function diagnoseAdministrator(url){
  // password, derived hash, salt, session token, or complete account response.
  const query=await cf('/d1/database/'+config.d1_databases[0].database_id+'/query','POST',{sql:'SELECT id,login_id,password_hash,active,last_login_at,created_at,updated_at FROM users WHERE is_admin=1'});
  const administrator=query?.[0]?.results?.[0];if(!administrator)throw new Error('관리자 계정이 없습니다.');
- const parts=administrator.password_hash.split('$'),validFormat=parts.length===4&&parts[0]==='pbkdf2'&&parts[1]==='100000'&&!!parts[2]&&/^[a-f0-9]{64}$/i.test(parts[3]);
- const expected=validFormat?Buffer.from(parts[3],'hex'):null,actual=validFormat?pbkdf2Sync(password,parts[2],100000,32,'sha256'):null;
- const matches=validFormat&&timingSafeEqual(expected,actual);
- console.log('관리자 로그인 진단: '+JSON.stringify({default_id:administrator.login_id==='admin',active:administrator.active===1,valid_hash:validFormat,matches_deployment_password:matches,never_logged_in:!administrator.last_login_at,account_unchanged:administrator.created_at===administrator.updated_at}));
- if(!matches){console.log('관리자 저장 비밀번호와 배포 초기 비밀번호가 다릅니다. 기존 계정 비밀번호를 자동으로 덮어쓰지 않습니다.');return;}
+ const diagnosis=inspectAdministrator(administrator,password);
+ console.log('관리자 로그인 진단: '+JSON.stringify(diagnosis));
+ if(!diagnosis.matches_deployment_password){console.log('관리자 저장 비밀번호와 배포 초기 비밀번호가 다릅니다. 기존 계정 비밀번호를 자동으로 덮어쓰지 않습니다.');return;}
  const login=await fetch(url+'/api/login',{method:'POST',headers:{Origin:url,'Content-Type':'application/json'},body:JSON.stringify({username:administrator.login_id,password}),signal:AbortSignal.timeout(20000)});
  if(!login.ok)throw new Error('운영 관리자 로그인 검사 실패 (HTTP '+login.status+')');
  const session=login.headers.get('Set-Cookie')?.split(';')[0];if(!session)throw new Error('운영 로그인 세션이 발급되지 않았습니다.');
@@ -90,10 +88,18 @@ try{
  await ensureDatabase();await ensureBucket();
  writeFileSync('wrangler.jsonc',JSON.stringify(config,null,2)+'\n');
  run(['d1','migrations','apply','DB','--remote']);
+ const hash=passwordHash(password);
+ // Create the initial account from this deployment's credentials before the
+ // Worker can receive traffic and import an older runtime secret.
+ const initial=await prepareAdministrator(async(sql,params=[])=>{
+  const result=await cf('/d1/database/'+config.d1_databases[0].database_id+'/query','POST',{sql,params});
+  if(!result?.[0]?.success)throw new Error('관리자 초기 계정 준비 실패');
+  return result[0].results||[];
+ },password,hash);
+ console.log('관리자 계정 준비: '+initial.status);
+ if(initial.status==='repaired_initial_password')console.log('미사용·미수정 admin 계정의 초기 비밀번호 불일치 복구 완료');
  // A new Worker must exist before the CLI can pipe its secret without prompting.
  let output=run(['deploy']);
- const salt=randomBytes(16).toString('hex');
- const hash='pbkdf2$100000$'+salt+'$'+pbkdf2Sync(password,salt,100000,32,'sha256').toString('hex');
  run(['secret','bulk'],JSON.stringify({ADMIN_PASSWORD_HASH:hash}));
  output=run(['deploy']);
  const match=[...output.matchAll(/https:\/\/[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev/gi)].find(m=>new URL(m[0]).hostname.startsWith(config.name+'.'));

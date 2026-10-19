@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { pbkdf2Sync, createHash } from 'node:crypto';
 import { Miniflare, FormData } from 'miniflare';
+import { passwordHash, inspectAdministrator, prepareAdministrator } from '../scripts/admin-credentials.mjs';
 const password='local-test-password-only',origin='https://document-hub.test';
 const hash='pbkdf2$100000$integration-salt$'+pbkdf2Sync(password,'integration-salt',100000,32,'sha256').toString('hex');
 const mf=new Miniflare({modules:true,scriptPath:'src/worker.js',compatibilityDate:'2026-05-15',d1Databases:['DB'],r2Buckets:['FILES'],bindings:{ADMIN_PASSWORD_HASH:hash},serviceBindings:{ASSETS:()=>new Response('<!doctype html><title>문서관리</title>',{headers:{'Content-Type':'text/html'}})}});
@@ -21,7 +22,7 @@ const document=async id=>ok(await req('/api/documents/'+id));
 const edit=async (bundle,extra={},files=[])=>{
  const r=bundle.revisions[0];return save('/api/revisions/'+r.id,form(bundle.document.organization_id,bundle.document.category_id,r.title,{revision_date:r.revision_date,summary:r.summary,manager:r.manager,approval_no:r.approval_no,document_type:bundle.document.document_type,token:r.token,related_document_id:bundle.related_document_id,keep_attachments:r.attachments.map(a=>a.id),...extra}),files,'PUT');
 };
-async function migrate(name){const sql=await readFile('migrations/'+name,'utf8');await db.batch(sql.split(/;\s*\n/).map(s=>s.trim()).filter(Boolean).map(sql=>db.prepare(sql)));}
+async function migrate(name,database=db){const sql=await readFile('migrations/'+name,'utf8');await database.batch(sql.split(/;\s*\n/).map(s=>s.trim()).filter(Boolean).map(sql=>database.prepare(sql)));}
 test('문서관리: 고정 구분·1:1 연결·기관별 비교 표 통합 검증',async t=>{
  t.after(()=>mf.dispose());db=await mf.getD1Database('DB');bucket=await mf.getR2Bucket('FILES');
  await migrate('0001_initial.sql');
@@ -429,6 +430,37 @@ test('문서관리: 고정 구분·1:1 연결·기관별 비교 표 통합 검�
   assert.equal(ok(await req('/api/health')).login_attempt_limit,false);
   assert.equal((await db.prepare('SELECT count(*) n FROM login_attempts').first()).n,0);
  });
+});
+
+test('배포 전 관리자 생성·미사용 초기 비밀번호 복구·로그인 및 수정한 비밀번호 보존·동시 변경 보호',async t=>{
+ const previousHash=passwordHash('old-runtime-secret-password');
+ const fixture=new Miniflare({modules:true,scriptPath:'src/worker.js',compatibilityDate:'2026-05-15',d1Databases:['DB'],r2Buckets:['FILES'],bindings:{ADMIN_PASSWORD_HASH:previousHash},serviceBindings:{ASSETS:()=>new Response('ok')}});
+ t.after(()=>fixture.dispose());const database=await fixture.getD1Database('DB');
+ for(const name of ['0001_initial.sql','0002_document_pairs.sql','0003_flat_work_categories.sql','0004_document_types_and_users.sql'])await migrate(name,database);
+ const query=async(sql,params=[])=>{const result=await database.prepare(sql).bind(...params).all();return result.results;};
+ const root=()=>database.prepare('SELECT * FROM users WHERE is_admin=1').first();
+ assert.equal((await prepareAdministrator(query,password)).status,'created');
+ let user=await root();const originalId=user.id;assert.equal(inspectAdministrator(user,password).matches_deployment_password,true);
+ assert.equal((await prepareAdministrator(query,password)).status,'unchanged');
+ // Reproduce importing a stale runtime secret into the untouched initial user.
+ await database.prepare('UPDATE users SET password_hash=? WHERE id=?').bind(previousHash,user.id).run();
+ user=await root();assert.equal(inspectAdministrator(user,password).matches_deployment_password,false);assert.equal(user.last_login_at,null);assert.equal(user.created_at,user.updated_at);
+ assert.equal((await prepareAdministrator(query,password)).status,'repaired_initial_password');
+ user=await root();assert.equal(user.id,originalId);assert.equal(inspectAdministrator(user,password).matches_deployment_password,true);assert.notEqual(user.created_at,user.updated_at);
+ await fixture.dispatchFetch(origin+'/api/health');assert.equal((await root()).password_hash,user.password_hash);
+ const login=await fixture.dispatchFetch(origin+'/api/login',{method:'POST',headers:{Origin:origin,'Content-Type':'application/json'},body:JSON.stringify({username:'admin',password})});assert.equal(login.status,200);
+ const signedIn=await root();assert.ok(signedIn.last_login_at);
+ assert.equal((await prepareAdministrator(query,'different-deployment-password')).status,'unchanged');assert.equal((await root()).password_hash,signedIn.password_hash);
+ // Explicit account edits are also preserved without relying on login history.
+ const manuallyChanged=passwordHash('changed-before-login-password');
+ await database.prepare('UPDATE users SET password_hash=?,last_login_at=NULL,updated_at=? WHERE id=?').bind(manuallyChanged,'2026-10-20T00:00:00Z',originalId).run();
+ assert.equal((await prepareAdministrator(query,password)).status,'unchanged');assert.equal((await root()).password_hash,manuallyChanged);
+ // A login or edit racing recovery invalidates its optimistic token.
+ await database.prepare('UPDATE users SET password_hash=?,last_login_at=NULL,updated_at=created_at WHERE id=?').bind(previousHash,originalId).run();
+ let raced=false;
+ const racingQuery=async(sql,params)=>{if(sql.startsWith('UPDATE users SET password_hash=')){raced=true;await database.prepare("UPDATE users SET token='concurrent-account-edit',password_hash=? WHERE id=?").bind(manuallyChanged,originalId).run();}return query(sql,params);};
+ assert.equal((await prepareAdministrator(racingQuery,password)).status,'unchanged');assert.equal(raced,true);assert.equal((await root()).password_hash,manuallyChanged);
+ assert.equal((await database.prepare('SELECT count(*) n FROM users').first()).n,1);
 });
 
 test('등록 화면 순서·첫 업무구분 기본값·명칭·연월 검색 화면·표 제목 글자 크기',async()=>{
