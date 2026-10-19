@@ -12,3 +12,46 @@
 .search-disclosure[open] .search-open-label{display:inline}
 .search-disclosure[open] .search-toggle-state svg{transform:rotate(180deg)}
 .search-content{margin-top:17px}
+
+.detail-header .heading-buttons{flex-wrap:wrap}
+.detail-comparison{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px;align-items:start}
+.comparison-column{min-width:0}
+.comparison-column>.history-heading{margin:0 0 12px;font-size:15px}
+.comparison-help{font-size:11px;line-height:1.8;color:#82959f;margin:0 0 12px}
+.history-scroll{max-height:72vh;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding:4px 6px 6px 2px}
+.history-jumps{display:flex;gap:8px;overflow-x:auto;white-space:nowrap;margin:0 0 12px;padding-bottom:3px}
+.history-jumps .text-btn{font-size:10px;background:#edf3f1;border-radius:5px;padding:5px 8px;flex-shrink:0}
+.related-document{border:1px solid #e0e8ed;border-radius:11px;background:#eef3f5;margin-bottom:18px;overflow:hidden}
+.related-document-title{display:flex;align-items:flex-start;gap:8px;margin:0;padding:15px 16px;font-size:13px;font-weight:650;color:#4f6c79;overflow-wrap:anywhere}
+.related-document-title svg{width:16px;height:16px;margin-top:2px;flex-shrink:0}
+.related-revisions{padding:0 12px 12px}
+.related-revision{padding:16px;margin:0 0 12px;scroll-margin-top:12px}
+.related-revision:last-child{margin-bottom:0}
+.related-revision::before{display:none}
+.related-revision.is-linked{border-left:3px solid #8ab8ab}
+.related-revision .revision-title{font-size:13px;line-height:1.7;margin-bottom:10px}
+.related-revision .revision-top{flex-wrap:wrap}
+.related-revision .revision-top>div{flex-wrap:wrap}
+.related-revision .attachment .filename{max-width:220px}
+.related-revision .attachment{font-size:10px;padding:7px 8px}
+.no-attachments{color:#91a3ac;font-size:11px;margin:0}
+.related-revision-toggle{display:flex;align-items:center;gap:6px;list-style:none;cursor:pointer;border-top:1px solid #edf1f3;margin-top:14px;padding:10px 0 0;color:#64897d;font-size:11px;font-weight:600}
+.related-revision-toggle::-webkit-details-marker{display:none}
+.related-revision-toggle>.icon{width:14px;height:14px;margin-left:auto;transition:transform .15s}
+.revision-disclosure>.related-revision-toggle .when-open{display:none}
+.revision-disclosure[open]>.related-revision-toggle .when-closed{display:none}
+.revision-disclosure[open]>.related-revision-toggle .when-open{display:inline}
+.revision-disclosure[open]>.related-revision-toggle>.icon{transform:rotate(180deg)}
+.related-revision-body{margin-top:16px}
+.related-document-meta{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:0 0 14px;font-size:11px}
+.related-document-meta dt{font-size:10px;color:#8a9ea7;margin-bottom:3px}
+.related-document-meta dd{margin:0;color:#657e8c;overflow-wrap:anywhere}
+.badge.linked{background:#eaf4f0;color:#498777}
+.related-document-actions{border-top:1px solid #edf1f3;margin-top:14px;padding-top:9px}
+.related-empty{background:#fff;border:1px dashed #cfdddf;border-radius:11px;padding:35px 18px;text-align:center;display:flex;align-items:center;flex-direction:column}
+.related-empty .empty-icon{width:48px;height:48px;border-radius:14px}
+.related-empty .empty-icon svg{width:23px;height:23px}
+.related-empty h3{font-size:13px;font-weight:600;margin:0 0 8px}
+.related-empty p{font-size:11px;color:#8a9da6;line-height:1.9;margin:0}
+@media(max-width:1100px) and (min-width:801px){.detail-comparison{gap:14px}.detail-comparison .revision-card{padding:15px}.detail-comparison .timeline{padding-left:18px;margin-left:5px}.detail-comparison .timeline .revision-card::before{left:-24px}.related-revisions{padding:0 8px 8px}.related-document-title{padding:13px}.related-document-meta{grid-template-columns:1fr}.detail-comparison .revision-meta{gap:8px}}
+@media(max-width:800px){.detail-comparison{grid-template-columns:minmax(0,1fr);gap:25px}.history-scroll{max-height:none;overflow:visible;scrollbar-gutter:auto;padding:4px 0}.related-document-meta{grid-template-columns:1fr 1fr}.related-revision .attachment .filename{max-width:270px}}

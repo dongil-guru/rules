@@ -46,7 +46,7 @@ test('문서이음: 실제 Workers·D1·R2 통합 검증',async t=>{
   const temp=ok(await req('/api/categories',{method:'POST',data:{name:'삭제할 분류'}}),201).id;ok(await req('/api/categories/'+temp,{method:'DELETE'}));
  });
  await t.test('최초 제정·복수 첨부파일·다른 기관 2건 참조',async()=>{
-  target1=ok(await save('/api/documents',form(orgB,child,'상위 지침 A',{revision_date:'2026-01-01'})),201);
+  target1=ok(await save('/api/documents',form(orgB,child,'상위 지침 A',{revision_date:'2026-01-01'}),[['상위A.pdf','upper-file']]),201);
   target2=ok(await save('/api/documents',form(orgB,cat2,'상위 지침 B',{revision_date:'2026-02-01'})),201);
   source=ok(await save('/api/documents',form(orgA,child,'내부 정보보안 지침',{revision_date:'2025-01-01',manager:'이전담당자',relations:[target1.revision_id,target2.revision_id]}),[['지침.pdf','first-file'],['비교표.hwp','second-file']]),201);
   const data=await document(source.document_id),r=data.revisions[0];assert.equal(r.sequence,1);assert.equal(r.attachments.length,2);assert.equal(r.relations.length,2);
@@ -61,6 +61,28 @@ test('문서이음: 실제 Workers·D1·R2 통합 검증',async t=>{
   ok(await save(`/api/documents/${target1.document_id}/revisions`,form(orgB,child,'상위 지침 A 개정')),201);
   const after=await document(source.document_id);assert.equal(after.revisions[0].relations.find(r=>r.document_id===target1.document_id).id,target1.revision_id);
   const options=ok(await req('/api/references?exclude_org='+orgA));assert.ok(options.revisions.length>=3);assert.ok(options.revisions.every(r=>r.organization_id!==orgA));
+ });
+ await t.test('연관문서 전체 이력·첨부·역참조 조회와 중복 병합',async()=>{
+  const current=await document(source.document_id);
+  assert.equal(current.related_documents.length,2);
+  const upper=current.related_documents.find(group=>group.document.id===target1.document_id);
+  assert.deepEqual(upper.revisions.map(r=>r.sequence),[2,1]);
+  assert.equal(upper.revisions[0].title,'상위 지침 A 개정');
+  assert.deepEqual(upper.linked_revision_ids,[target1.revision_id]);
+  assert.equal(upper.revisions[1].attachments[0].name,'상위A.pdf');
+  assert.equal((await req('/api/files/'+upper.revisions[1].attachments[0].id)).body,'upper-file');
+  assert.ok(upper.revisions[1].backlinks.some(r=>r.document_id===source.document_id));
+  assert.deepEqual((await document(target2.document_id)).related_documents,[]);
+  const comparison=ok(await save('/api/documents',form(orgA,child,'임시 비교 문서',{relations:[target1.revision_id,upper.revisions[0].id]})),201);
+  const single=await document(comparison.document_id);
+  assert.equal(single.related_documents.length,1);
+  assert.equal(single.related_documents[0].revisions.length,2);
+  assert.deepEqual(new Set(single.related_documents[0].linked_revision_ids),new Set([target1.revision_id,upper.revisions[0].id]));
+  const revision=single.revisions[0];
+  ok(await save('/api/revisions/'+revision.id,form(orgA,child,'임시 비교 문서',{token:revision.token,relations:[]}),[],'PUT'));
+  const cleared=await document(comparison.document_id);
+  assert.deepEqual(cleared.related_documents,[]);
+  ok(await req('/api/documents/'+comparison.document_id,{method:'DELETE',data:{token:cleared.revisions[0].token}}));
  });
  await t.test('모든 정보 수정·첨부 교체·기관/업무 이동·연관링크 교체',async()=>{
   const before=await document(source.document_id),r=before.revisions[0];

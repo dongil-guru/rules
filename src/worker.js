@@ -130,13 +130,26 @@ async function listDocuments(url,env) {
 async function detail(env,id) {
   const document=await first(env,`SELECT d.*,o.name organization_name,c.name category_name,c.parent_id FROM documents d JOIN organizations o ON o.id=d.organization_id JOIN work_categories c ON c.id=d.category_id WHERE d.id=?`,id);
   if(!document)fail(404,'문서를 찾을 수 없습니다. 삭제되었을 수 있습니다.');
+  const relatedIds=`SELECT DISTINCT t.document_id FROM relations l JOIN revisions s ON s.id=l.source_id JOIN revisions t ON t.id=l.target_id WHERE s.document_id=?`;
   const result=await env.DB.batch([
     stmt(env,'SELECT * FROM revisions WHERE document_id=? ORDER BY sequence DESC',id),
     stmt(env,`SELECT a.id,a.revision_id,a.name,a.size,a.mime,a.created_at FROM attachments a JOIN revisions r ON r.id=a.revision_id WHERE r.document_id=? ORDER BY a.created_at,a.name`,id),
     stmt(env,`SELECT l.source_id,r.id,r.document_id,r.title,r.revision_date,r.sequence,d.organization_id,o.name organization_name FROM relations l JOIN revisions s ON s.id=l.source_id JOIN revisions r ON r.id=l.target_id JOIN documents d ON d.id=r.document_id JOIN organizations o ON o.id=d.organization_id WHERE s.document_id=? ORDER BY o.name,r.title,r.sequence DESC`,id),
-    stmt(env,`SELECT l.target_id,r.id,r.document_id,r.title,r.revision_date,r.sequence,o.name organization_name FROM relations l JOIN revisions t ON t.id=l.target_id JOIN revisions r ON r.id=l.source_id JOIN documents d ON d.id=r.document_id JOIN organizations o ON o.id=d.organization_id WHERE t.document_id=? ORDER BY o.name,r.title`,id)
+    stmt(env,`SELECT l.target_id,r.id,r.document_id,r.title,r.revision_date,r.sequence,o.name organization_name FROM relations l JOIN revisions t ON t.id=l.target_id JOIN revisions r ON r.id=l.source_id JOIN documents d ON d.id=r.document_id JOIN organizations o ON o.id=d.organization_id WHERE t.document_id=? ORDER BY o.name,r.title`,id),
+    stmt(env,`SELECT d.*,o.name organization_name,c.name category_name,c.parent_id FROM documents d JOIN organizations o ON o.id=d.organization_id JOIN work_categories c ON c.id=d.category_id WHERE d.id IN (${relatedIds}) ORDER BY o.name,d.created_at,d.id`,id),
+    stmt(env,`SELECT r.* FROM revisions r WHERE r.document_id IN (${relatedIds}) ORDER BY r.document_id,r.sequence DESC`,id),
+    stmt(env,`SELECT a.id,a.revision_id,a.name,a.size,a.mime,a.created_at FROM attachments a JOIN revisions r ON r.id=a.revision_id WHERE r.document_id IN (${relatedIds}) ORDER BY a.created_at,a.name`,id),
+    stmt(env,`SELECT l.source_id,r.id,r.document_id,r.title,r.revision_date,r.sequence,o.name organization_name FROM relations l JOIN revisions s ON s.id=l.source_id JOIN revisions r ON r.id=l.target_id JOIN documents d ON d.id=r.document_id JOIN organizations o ON o.id=d.organization_id WHERE s.document_id IN (${relatedIds}) ORDER BY o.name,r.title,r.sequence DESC`,id),
+    stmt(env,`SELECT l.target_id,r.id,r.document_id,r.title,r.revision_date,r.sequence,o.name organization_name FROM relations l JOIN revisions t ON t.id=l.target_id JOIN revisions r ON r.id=l.source_id JOIN documents d ON d.id=r.document_id JOIN organizations o ON o.id=d.organization_id WHERE t.document_id IN (${relatedIds}) ORDER BY o.name,r.title`,id)
   ]);
-  return json({document,revisions:result[0].results.map(r=>({...r,attachments:result[1].results.filter(a=>a.revision_id===r.id),relations:result[2].results.filter(a=>a.source_id===r.id),backlinks:result[3].results.filter(a=>a.target_id===r.id)}))});
+  const filesByRevision=new Map(),revisionsByDocument=new Map(),linkedByDocument=new Map(),linksByRevision=new Map(),backlinksByRevision=new Map();
+  for(const file of result[6].results){if(!filesByRevision.has(file.revision_id))filesByRevision.set(file.revision_id,[]);filesByRevision.get(file.revision_id).push(file);}
+  for(const link of result[7].results){if(!linksByRevision.has(link.source_id))linksByRevision.set(link.source_id,[]);linksByRevision.get(link.source_id).push(link);}
+  for(const link of result[8].results){if(!backlinksByRevision.has(link.target_id))backlinksByRevision.set(link.target_id,[]);backlinksByRevision.get(link.target_id).push(link);}
+  for(const revision of result[5].results){if(!revisionsByDocument.has(revision.document_id))revisionsByDocument.set(revision.document_id,[]);revisionsByDocument.get(revision.document_id).push({...revision,attachments:filesByRevision.get(revision.id)||[],relations:linksByRevision.get(revision.id)||[],backlinks:backlinksByRevision.get(revision.id)||[]});}
+  for(const link of result[2].results){if(!linkedByDocument.has(link.document_id))linkedByDocument.set(link.document_id,new Set());linkedByDocument.get(link.document_id).add(link.id);}
+  const related_documents=result[4].results.map(document=>({document,revisions:revisionsByDocument.get(document.id)||[],linked_revision_ids:[...(linkedByDocument.get(document.id)||[])]}));
+  return json({document,revisions:result[0].results.map(r=>({...r,attachments:result[1].results.filter(a=>a.revision_id===r.id),relations:result[2].results.filter(a=>a.source_id===r.id),backlinks:result[3].results.filter(a=>a.target_id===r.id)})),related_documents});
 }
 async function references(url,env) {
   const exclude=url.searchParams.get('exclude_org');if(!exclude)fail(400,'문서의 기관을 먼저 선택해 주세요.');
