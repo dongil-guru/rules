@@ -50,15 +50,17 @@ async function verify(url){
  for(let attempt=0;attempt<6;attempt++){
   try{
    const response=await fetch(url+'/api/health',{signal:AbortSignal.timeout(20000)}),health=await response.json();
-   if(response.ok&&health.ready&&health.account_management&&health.login_attempt_limit===false){
+   if(response.ok&&health.ready&&health.account_management&&health.login_attempt_limit===false&&health.ip_access_control){
     // Passwords and login IDs can now change in the site. Verify storage through
     // the existing deployment credential without resetting any user credentials.
-    const query=await cf('/d1/database/'+config.d1_databases[0].database_id+'/query','POST',{sql:"SELECT (SELECT count(*) FROM users WHERE is_admin=1 AND active=1 AND length(password_hash)>0) administrator_count,(SELECT count(*) FROM documents WHERE document_type NOT IN ('지침','매뉴얼','가이드라인','기타')) invalid_document_types,(SELECT count(*) FROM pragma_table_info('work_categories') WHERE name='parent_id') legacy_category_columns,(SELECT count(*) FROM pragma_table_info('work_categories') WHERE name='sort_order') category_order_columns,(SELECT count(*) FROM user_sessions s LEFT JOIN users u ON u.id=s.user_id WHERE u.id IS NULL) invalid_sessions"});
+    const query=await cf('/d1/database/'+config.d1_databases[0].database_id+'/query','POST',{sql:"SELECT (SELECT count(*) FROM users WHERE is_admin=1 AND active=1 AND length(password_hash)>0) administrator_count,(SELECT count(*) FROM documents WHERE document_type NOT IN ('지침','매뉴얼','가이드라인','기타')) invalid_document_types,(SELECT count(*) FROM documents WHERE requirement NOT IN ('권장','필수')) invalid_requirements,(SELECT mode FROM access_settings WHERE id=1) access_mode,(SELECT count(*) FROM pragma_table_info('work_categories') WHERE name='parent_id') legacy_category_columns,(SELECT count(*) FROM pragma_table_info('work_categories') WHERE name='sort_order') category_order_columns,(SELECT count(*) FROM user_sessions s LEFT JOIN users u ON u.id=s.user_id WHERE u.id IS NULL) invalid_sessions"});
     const row=query?.[0]?.results?.[0];
-    if(!row||row.administrator_count!==1||row.invalid_document_types!==0||row.legacy_category_columns!==0||row.category_order_columns!==1||row.invalid_sessions!==0)throw new Error('운영 데이터 구조 검사 실패');
+    if(!row||row.administrator_count!==1||row.invalid_document_types!==0||row.invalid_requirements!==0||!['all','allowlist'].includes(row.access_mode)||row.legacy_category_columns!==0||row.category_order_columns!==1||row.invalid_sessions!==0)throw new Error('운영 데이터 구조 검사 실패');
     for(const asset of ['/app.js','/styles.css','/index.html']){
      const frontend=await fetch(url+asset,{cache:'no-store',signal:AbortSignal.timeout(20000)});
-     if(!frontend.ok||(await frontend.text())!==readFileSync('public'+asset,'utf8'))throw new Error('최신 화면 파일 배포 확인 필요: '+asset);
+     const body=await frontend.text();
+     if(asset==='/index.html'&&row.access_mode==='allowlist'&&frontend.status===403&&body.includes('data-ip-access-denied'))continue;
+     if(!frontend.ok||body!==readFileSync('public'+asset,'utf8'))throw new Error('최신 화면 파일 배포 확인 필요: '+asset);
     }
     return;
    }
@@ -68,6 +70,11 @@ async function verify(url){
  throw new Error('배포 후 계정·데이터베이스·화면 파일 검사를 통과하지 못했습니다. Cloudflare 배포 상태를 확인해 주세요.');
 }
 async function diagnoseAdministrator(url){
+ const network=await fetch(url+'/api/session',{signal:AbortSignal.timeout(20000)});
+ if(network.status===403&&(await network.json()).code==='IP_ACCESS_DENIED'){
+  console.log('운영 IP 접근제어 유지 확인: 배포 환경의 로그인은 허용하지 않고 저장소·배포 파일을 검사했습니다.');return;
+ }
+ if(!network.ok)throw new Error('운영 로그인 화면 접근 검사 실패 (HTTP '+network.status+')');
  // Inspect credentials only in this secret-enabled process. Never print a
  // password, derived hash, salt, session token, or complete account response.
  const query=await cf('/d1/database/'+config.d1_databases[0].database_id+'/query','POST',{sql:'SELECT id,login_id,password_hash,active,last_login_at,created_at,updated_at FROM users WHERE is_admin=1'});

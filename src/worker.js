@@ -1,3 +1,5 @@
+import { normalizeIp, clientIp, networkAllowed, deniedResponse } from './access-control.mjs';
+
 const MAX_FILE = 20 * 1024 * 1024;
 const MAX_TOTAL = 40 * 1024 * 1024;
 const DOCUMENT_TYPES = ['지침','매뉴얼','가이드라인','기타'];
@@ -102,6 +104,41 @@ async function bootstrap(env,user) {
   return json({organizations:results[0].results,categories:results[1].results,stats:results[2].results[0],user,document_types:DOCUMENT_TYPES});
 }
 function requireAdministrator(user){if(!user.is_admin)fail(403,'관리자만 사용할 수 있는 기능입니다.');}
+async function accessControl(request,env){
+  const result=await env.DB.batch([stmt(env,'SELECT mode,token FROM access_settings WHERE id=1'),stmt(env,'SELECT * FROM allowed_ips ORDER BY created_at,id')]);
+  return json({...result[0].results[0],ips:result[1].results.map(ip=>({...ip,active:!!ip.active})),client_ip:clientIp(request)});
+}
+async function mutateAccess(request,env,id){
+  const body=await readJSON(request),settings=await first(env,'SELECT * FROM access_settings WHERE id=1');
+  if(body.token!==settings.token)fail(409,'접근제어 설정이 변경되었습니다. 새로고침 후 다시 시도해 주세요.');
+  const ip=clientIp(request)||'',token=uid(),time=now();
+  let mode=settings.mode,address='',description='',active=true,existing=null;
+  if(!id&&request.method==='PUT'){
+    mode=body.mode;if(!['all','allowlist'].includes(mode))fail(400,'IP 허용 방식을 선택해 주세요.');
+  }else{
+    existing=id?await first(env,'SELECT * FROM allowed_ips WHERE id=?',id):null;if(id&&!existing)fail(404,'등록된 IP를 찾을 수 없습니다.');
+    if(request.method!=='DELETE'){
+      address=normalizeIp(body.ip);if(!address)fail(400,'올바른 IPv4 또는 IPv6 주소 한 개를 입력해 주세요.');
+      description=clean(body.description,'설명',200);active=body.active===undefined?(existing?!!existing.active:true):body.active;
+      if(typeof active!=='boolean')fail(400,'활성화 여부를 확인해 주세요.');
+    }
+  }
+  const isMode=!id&&request.method==='PUT',keepsCurrent=!isMode&&request.method!=='DELETE'&&active&&address===ip;
+  const safeSql=isMode?"(?='all' OR EXISTS(SELECT 1 FROM allowed_ips WHERE ip=? AND active=1))":"(mode='all' OR ?=1 OR EXISTS(SELECT 1 FROM allowed_ips WHERE ip=? AND active=1 AND id<>?))";
+  const safeArgs=isMode?[mode,ip]:[keepsCurrent?1:0,ip,id||''];
+  const commands=[stmt(env,`UPDATE access_settings SET mode=?,token=?,updated_at=? WHERE id=1 AND token=? AND ${safeSql}`,mode,token,time,body.token,...safeArgs)];
+  const guard='EXISTS(SELECT 1 FROM access_settings WHERE id=1 AND token=?)';
+  if(!isMode){
+    if(request.method==='DELETE')commands.push(stmt(env,`DELETE FROM allowed_ips WHERE id=? AND ${guard}`,id,token));
+    else if(existing)commands.push(stmt(env,`UPDATE allowed_ips SET ip=?,description=?,active=?,updated_at=? WHERE id=? AND ${guard}`,address,description,active?1:0,time,id,token));
+    else commands.push(stmt(env,`INSERT INTO allowed_ips(id,ip,description,active,created_at,updated_at) SELECT ?,?,?,?,?,? WHERE ${guard}`,uid(),address,description,active?1:0,time,time,token));
+  }
+  try{
+    const result=await env.DB.batch(commands);
+    if(!result[0].meta.changes)fail(409,'설정이 변경되었거나 현재 관리자 IP가 차단되는 설정입니다. 현재 접속 IP를 활성화 상태로 등록한 후 다시 시도해 주세요.');
+  }catch(e){if(String(e).includes('UNIQUE'))fail(409,'이미 등록된 IP입니다.');throw e;}
+  return accessControl(request,env);
+}
 function userDateTime(value){
   if(value==null||value==='')return null;
   if(typeof value!=='string'||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)||!Number.isFinite(new Date(value).getTime()))fail(400,'마지막 로그인 일시를 확인해 주세요.');
@@ -205,7 +242,7 @@ async function listDocuments(url,env) {
   const filter=category?'AND d.category_id=?':'';
   const result=await env.DB.batch([
     stmt(env,`SELECT d.id FROM documents d WHERE EXISTS(SELECT 1 FROM revisions s WHERE s.document_id=d.id AND ${search.sql}) ${filter}`,...search.args,...(category?[category]:[])),
-    stmt(env,`SELECT d.id,d.organization_id,d.category_id,d.document_type,o.name organization_name,c.name category_name,c.name category_path,c.sort_order category_order,
+    stmt(env,`SELECT d.id,d.organization_id,d.category_id,d.document_type,d.requirement,o.name organization_name,c.name category_name,c.name category_path,c.sort_order category_order,
       r.id revision_id,r.title,r.revision_date,r.summary,r.manager,r.approval_no,r.sequence,r.updated_at,
       (SELECT count(*) FROM revisions v WHERE v.document_id=d.id) revision_count,
       (SELECT count(*) FROM revisions v WHERE v.document_id=d.id) display_sequence,
@@ -253,7 +290,7 @@ async function references(url,env) {
   if(!['kwwa','upper'].includes(side))fail(400,'기관 구분을 먼저 선택해 주세요.');
   if(!category)fail(400,'업무구분을 먼저 선택해 주세요.');
   const q=(url.searchParams.get('q')||'').normalize('NFC').trim().slice(0,100);
-  const list=await rows(env,`SELECT d.id,d.organization_id,d.category_id,d.document_type,o.name organization_name,r.id revision_id,r.title,r.revision_date,r.sequence,
+  const list=await rows(env,`SELECT d.id,d.organization_id,d.category_id,d.document_type,d.requirement,o.name organization_name,r.id revision_id,r.title,r.revision_date,r.sequence,
       (SELECT count(*) FROM revisions v WHERE v.document_id=d.id) display_sequence
     FROM documents d JOIN organizations o ON o.id=d.organization_id JOIN revisions r ON r.document_id=d.id
     WHERE d.organization_id<>? AND d.category_id=? AND d.id<>?
@@ -273,6 +310,8 @@ async function parsedRevision(request) {
   const organization=clean(data.organization_id,'기관',80,true),category=clean(data.category_id,'업무구분',80,true);
   const documentType=data.document_type===undefined?null:clean(data.document_type,'문서종류',20,true);
   if(documentType&&!DOCUMENT_TYPES.includes(documentType))fail(400,'문서종류는 지침·매뉴얼·가이드라인·기타 중에서 선택해 주세요.');
+  const requirement=data.requirement===undefined?null:clean(data.requirement,'필수여부',10,true);
+  if(requirement&&!['권장','필수'].includes(requirement))fail(400,'필수여부는 권장 또는 필수로 선택해 주세요.');
   if(data.relations!==undefined)fail(400,'문서 연결 방식이 변경되었습니다. 화면을 새로고침한 후 다시 저장해 주세요.');
   const keep=ids(data.keep_attachments||[],'첨부파일',20),related=clean(data.related_document_id,'연관문서',80);
   const hasRelated=Object.prototype.hasOwnProperty.call(data,'related_document_id');
@@ -280,19 +319,20 @@ async function parsedRevision(request) {
   if(files.length+keep.length>20)fail(400,'첨부파일은 이력당 20개까지 등록할 수 있습니다.');
   if(files.some(f=>f.size>MAX_FILE))fail(413,'파일 한 개의 크기는 20MB 이하여야 합니다.');
   if(files.reduce((s,f)=>s+f.size,0)>MAX_TOTAL)fail(413,'한 번에 첨부하는 파일은 총 40MB 이하여야 합니다.');
-  return {data,fields,organization,category,documentType,keep,related,hasRelated,files};
+  return {data,fields,organization,category,documentType,requirement,keep,related,hasRelated,files};
 }
 async function cleanup(env) {
   const garbage=await rows(env,'SELECT storage_key FROM file_garbage LIMIT 50');
   for(const item of garbage){try{await env.FILES.delete(item.storage_key);await stmt(env,'DELETE FROM file_garbage WHERE storage_key=?',item.storage_key).run();}catch{ /* Retry at the next mutation. */ }}
 }
 async function saveRevision(request,env,ctx,documentId,revisionId) {
-  const {data,fields,organization,category,documentType,keep,related,hasRelated,files}=await parsedRevision(request);
+  const {data,fields,organization,category,documentType,requirement,keep,related,hasRelated,files}=await parsedRevision(request);
   let original=null;
   if(revisionId){original=await first(env,'SELECT * FROM revisions WHERE id=?',revisionId);if(!original)fail(404,'수정할 이력을 찾을 수 없습니다.');documentId=original.document_id;if(data.token!==original.token)fail(409,'다른 창에서 변경된 이력입니다. 새로고침 후 다시 수정해 주세요.');}
   const existingDocument=documentId?await first(env,'SELECT * FROM documents WHERE id=?',documentId):null;
   if(documentId&&!existingDocument)fail(404,'문서를 찾을 수 없습니다.');
   const type=documentType||existingDocument?.document_type||'지침';
+  const required=requirement||existingDocument?.requirement||'권장';
   if(!['kwwa','upper'].includes(organization))fail(400,'기관 구분은 한국상하수도협회 또는 상위기관을 선택해 주세요.');
   if(!await first(env,'SELECT 1 FROM work_categories WHERE id=?',category))fail(400,'업무구분을 선택해 주세요.');
   if(keep.length&&!revisionId)fail(400,'이전 이력의 첨부파일은 원본 이력에서 확인해 주세요. 새 이력에는 파일을 첨부해 주세요.');
@@ -315,8 +355,8 @@ async function saveRevision(request,env,ctx,documentId,revisionId) {
     const guard=revisionId?'EXISTS(SELECT 1 FROM revisions WHERE id=? AND token=?)':'1=1',guardArgs=revisionId?[revId,token]:[];
     if(revisionId)commands.push(stmt(env,'UPDATE revisions SET title=?,revision_date=?,summary=?,manager=?,approval_no=?,token=?,updated_at=? WHERE id=? AND token=?',...f,token,time,revId,data.token));
     if(documentId)commands.push(stmt(env,`DELETE FROM document_pairs WHERE (kwwa_id=? OR upper_id=?) AND ${guard}`,docId,docId,...guardArgs));
-    if(!documentId)commands.push(stmt(env,'INSERT INTO documents(id,organization_id,category_id,created_at,document_type) VALUES(?,?,?,?,?)',docId,organization,category,time,type));
-    else commands.push(stmt(env,`UPDATE documents SET organization_id=?,category_id=?,document_type=? WHERE id=? AND ${guard}`,organization,category,type,docId,...guardArgs));
+    if(!documentId)commands.push(stmt(env,'INSERT INTO documents(id,organization_id,category_id,created_at,document_type,requirement) VALUES(?,?,?,?,?,?)',docId,organization,category,time,type,required));
+    else commands.push(stmt(env,`UPDATE documents SET organization_id=?,category_id=?,document_type=?,requirement=? WHERE id=? AND ${guard}`,organization,category,type,required,docId,...guardArgs));
     if(!revisionId)commands.push(stmt(env,'INSERT INTO revisions (id,document_id,sequence,title,revision_date,summary,manager,approval_no,token,created_at,updated_at) SELECT ?,?,COALESCE(MAX(sequence),0)+1,?,?,?,?,?,?,?,? FROM revisions WHERE document_id=?',revId,docId,...f,token,time,time,docId));
     if(target)commands.push(stmt(env,`INSERT INTO document_pairs(kwwa_id,upper_id,created_at) SELECT ?,?,? WHERE ${guard}`,organization==='kwwa'?docId:target,organization==='upper'?docId:target,time,...guardArgs));
     if(revisionId)commands.push(stmt(env,`DELETE FROM attachments WHERE revision_id=? ${keep.length?`AND id NOT IN (${keep.map(()=>'?').join(',')})`:''} AND ${guard}`,revId,...keep,...guardArgs));
@@ -350,15 +390,17 @@ async function download(env,id) {
 }
 async function route(request,env,ctx) {
   const url=new URL(request.url),path=url.pathname,method=request.method;
+  const publicAsset=['/app.js','/styles.css','/favicon.svg'].includes(path);
+  if(path!=='/api/health'&&!publicAsset&&env.DB&&!await networkAllowed(request,env.DB))return deniedResponse(request);
   if(!path.startsWith('/api/')){
     if(!['GET','HEAD'].includes(method))fail(405,'허용되지 않는 요청입니다.');
     const asset=await env.ASSETS.fetch(request);
     return asset.status===404&&request.headers.get('Accept')?.includes('text/html')?env.ASSETS.fetch(new Request(new URL('/index.html',url),request)):asset;
   }
   if(!['GET','HEAD'].includes(method)&&request.headers.get('Origin')!==url.origin)fail(403,'같은 사이트에서만 변경할 수 있습니다. 페이지를 새로고침해 주세요.');
-  if(path==='/api/session'&&method==='GET'){const user=await authorized(request,env);return json({authenticated:!!user,user,configured:configReady(env),username:env.ADMIN_USER||'admin'});}
+  if(path==='/api/session'&&method==='GET'){const user=await authorized(request,env);return json({authenticated:!!user,user,configured:configReady(env),username:env.ADMIN_USER||'admin',client_ip:clientIp(request)});}
   if(path==='/api/login'&&method==='POST')return login(request,env);
-  if(path==='/api/health'&&method==='GET'){if(configReady(env))await ensureAdministrator(env);return json({ready:configReady(env)&&!!await first(env,'SELECT id FROM users WHERE is_admin=1 AND active=1'),account_management:true,login_attempt_limit:false});}
+  if(path==='/api/health'&&method==='GET'){if(configReady(env))await ensureAdministrator(env);return json({ready:configReady(env)&&!!await first(env,'SELECT id FROM users WHERE is_admin=1 AND active=1'),account_management:true,login_attempt_limit:false,ip_access_control:true});}
   const user=await authorized(request,env);
   if(!user)fail(401,'로그인이 필요합니다. 다시 로그인해 주세요.');
   if(path==='/api/logout'&&method==='POST'){await stmt(env,'DELETE FROM user_sessions WHERE token_hash=?',await digest(cookieValue(request))).run();return json({ok:true},200,{'Set-Cookie':sessionCookie(request,'',0)});}
@@ -366,6 +408,10 @@ async function route(request,env,ctx) {
   if(path==='/api/me/password'&&method==='PUT')return changeOwnPassword(request,env,user);
   if(path==='/api/users'&&method==='GET')return listUsers(env,user);
   if(path==='/api/users'&&method==='POST')return mutateUser(request,env,user);
+  if(path==='/api/access-control'){requireAdministrator(user);if(method==='GET')return accessControl(request,env);if(method==='PUT')return mutateAccess(request,env);fail(405,'허용되지 않는 요청입니다.');}
+  if(path==='/api/access-control/ips'){requireAdministrator(user);if(method==='POST')return mutateAccess(request,env);fail(405,'허용되지 않는 요청입니다.');}
+  const rule=path.match(/^\/api\/access-control\/ips\/([\w-]+)$/);
+  if(rule){requireAdministrator(user);if(['PUT','DELETE'].includes(method))return mutateAccess(request,env,rule[1]);fail(405,'허용되지 않는 요청입니다.');}
   const account=path.match(/^\/api\/users\/([\w-]+)$/);
   if(account){requireAdministrator(user);if(['PUT','DELETE'].includes(method))return mutateUser(request,env,user,account[1]);fail(405,'허용되지 않는 요청입니다.');}
   if(path==='/api/bootstrap'&&method==='GET')return bootstrap(env,user);

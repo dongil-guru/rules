@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "check": "node --check src/worker.js && node --check public/app.js && node --check scripts/ci-deploy.mjs && node --check scripts/admin-credentials.mjs",
+    "check": "node --check src/worker.js && node --check src/access-control.mjs && node --check public/app.js && node --check scripts/ci-deploy.mjs && node --check scripts/admin-credentials.mjs",
     "test": "node --test test/integration.test.mjs",
     "build": "node scripts/build.mjs",
     "deploy": "wrangler deploy",
