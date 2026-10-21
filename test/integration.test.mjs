@@ -264,11 +264,13 @@ test('문서관리: 고정 구분·1:1 연결·기관별 비교 표 통합 검�
   const upper=ok(await save('/api/documents',form('upper',security,'보존할 상대 문서'),[['상대.pdf','keep-partner']]),201);
   const assoc=ok(await save('/api/documents',form('kwwa',security,'삭제할 제정',{related_document_id:upper.document_id}),[['제정.pdf','delete-first']]),201);
   for(const title of ['중간 개정','마지막 개정'])ok(await save(`/api/documents/${assoc.document_id}/revisions`,form('kwwa',security,title,{related_document_id:upper.document_id}),[[title+'.pdf',title]]),201);
+  const beforeCounts=ok(await req('/api/bootstrap')).category_document_counts,categoryCount=(counts,organization)=>counts.find(c=>c.category_id===security&&c.organization_id===organization)?.document_count||0;
   let data=await document(assoc.document_id);const middle=data.revisions[1],first=data.revisions.at(-1),last=data.revisions[0];
   assert.equal((await req('/api/revisions/'+middle.id,{method:'DELETE',data:{token:'stale-token'}})).status,409);
   assert.equal((await document(assoc.document_id)).revisions.length,3);
   for(const revision of [middle,first]){
    const result=ok(await req('/api/revisions/'+revision.id,{method:'DELETE',data:{token:revision.token}}));assert.equal(result.document_deleted,false);
+   assert.deepEqual(ok(await req('/api/bootstrap')).category_document_counts,beforeCounts);
    for(const file of revision.attachments)assert.equal((await req('/api/files/'+file.id)).status,404);
   }
   data=await document(assoc.document_id);assert.deepEqual(data.revisions.map(r=>r.sequence),[3]);assert.equal(data.related_document_id,upper.document_id);
@@ -276,6 +278,7 @@ test('문서관리: 고정 구분·1:1 연결·기관별 비교 표 통합 검�
   data=await document(assoc.document_id);assert.deepEqual(data.revisions.map(r=>r.sequence),[4,3]);
   ok(await req('/api/revisions/'+data.revisions[0].id,{method:'DELETE',data:{token:data.revisions[0].token}}));
   const removed=ok(await req('/api/revisions/'+last.id,{method:'DELETE',data:{token:last.token}}));assert.equal(removed.document_deleted,true);assert.equal(removed.document_id,assoc.document_id);
+  const afterCounts=ok(await req('/api/bootstrap')).category_document_counts;assert.equal(categoryCount(afterCounts,'kwwa'),categoryCount(beforeCounts,'kwwa')-1);assert.equal(categoryCount(afterCounts,'upper'),categoryCount(beforeCounts,'upper'));
   assert.equal((await req('/api/documents/'+assoc.document_id)).status,404);
   for(const file of last.attachments)assert.equal((await req('/api/files/'+file.id)).status,404);
   const survivor=await document(upper.document_id);assert.equal(survivor.related_document_id,null);assert.equal(survivor.columns.kwwa,null);assert.equal(survivor.revisions.length,1);
@@ -283,6 +286,7 @@ test('문서관리: 고정 구분·1:1 연결·기관별 비교 표 통합 검�
   const row=ok(await req('/api/documents?category='+security)).rows.find(row=>row.upper?.id===upper.document_id);assert.equal(row.kwwa,null);
   const upperRemoved=ok(await req('/api/revisions/'+survivor.revisions[0].id,{method:'DELETE',data:{token:survivor.revisions[0].token}}));assert.equal(upperRemoved.document_deleted,true);
   assert.equal((await req('/api/documents/'+upper.document_id)).status,404);
+  assert.equal(categoryCount(ok(await req('/api/bootstrap')).category_document_counts,'upper'),categoryCount(beforeCounts,'upper')-1);
   assert.ok(ok(await req('/api/bootstrap')).categories.some(c=>c.id===security));
  });
  await t.test('동시 삭제 및 개정 추가 경합에서 빈 문서가 남지 않음',async()=>{

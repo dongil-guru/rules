@@ -100,9 +100,10 @@ async function bootstrap(env,user) {
   const results = await env.DB.batch([
     stmt(env,'SELECT o.*,(SELECT count(*) FROM documents d WHERE d.organization_id=o.id) document_count FROM organizations o ORDER BY o.name COLLATE NOCASE'),
     stmt(env,'SELECT c.*,(SELECT count(*) FROM documents d WHERE d.category_id=c.id) document_count FROM work_categories c ORDER BY c.sort_order,c.id'),
-    stmt(env,`SELECT (SELECT count(*) FROM documents) documents, (SELECT count(*) FROM revisions) revisions, (SELECT count(*) FROM organizations) organizations, (SELECT count(DISTINCT document_id) FROM revisions WHERE updated_at>=?) recent`,new Date(Date.now()-30*86400000).toISOString())
+    stmt(env,`SELECT (SELECT count(*) FROM documents) documents, (SELECT count(*) FROM revisions) revisions, (SELECT count(*) FROM organizations) organizations, (SELECT count(DISTINCT document_id) FROM revisions WHERE updated_at>=?) recent`,new Date(Date.now()-30*86400000).toISOString()),
+    stmt(env,'SELECT category_id,organization_id,count(*) document_count FROM documents GROUP BY category_id,organization_id')
   ]);
-  return json({organizations:results[0].results,categories:results[1].results,stats:results[2].results[0],user,document_types:DOCUMENT_TYPES});
+  return json({organizations:results[0].results,categories:results[1].results,stats:results[2].results[0],category_document_counts:results[3].results,user,document_types:DOCUMENT_TYPES});
 }
 function requireAdministrator(user){if(!user.is_admin)fail(403,'관리자만 사용할 수 있는 기능입니다.');}
 async function accessControl(request,env){

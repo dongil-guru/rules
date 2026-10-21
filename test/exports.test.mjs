@@ -68,9 +68,10 @@ test('다운로드 API의 최신 이력·선택 범위·전체 첨부 보존·�
  ok(await request('/api/documents/'+other.document_id+'/revisions',{method:'POST',data:fields('upper',workB,'같은 날 나중',{revision_date:'2025-01-01'}),files:[['최근.txt','new same day']]}),201);
  const scope=(orgs=['kwwa'],cats=[workA])=>{const q=new URLSearchParams();orgs.forEach(x=>q.append('organization',x));cats.forEach(x=>q.append('category',x));return q.toString();};
  const clientArchive=manifest=>new Response(zipStream(attachmentEntries(manifest.documents,manifest.files,async file=>{const response=await request('/api/files/'+file.id);if(response.status!==200)throw new Error(response.body.error);return response.body;}))).arrayBuffer();
- await t.test('기관별 건수는 검색 필터와 관계없이 전체 문서 개수',async()=>{
+ await t.test('기관별 전체 건수와 업무별 건수는 이력 수·검색 필터와 관계없이 문서 개수로 집계',async()=>{
   const base=ok(await request('/api/bootstrap'));assert.deepEqual(base.organizations.map(o=>[o.id,o.document_count]).sort((a,b)=>a[0].localeCompare(b[0])),[['kwwa',2],['upper',2]]);
-  ok(await request('/api/documents?category='+workB+'&title=없는문서'));assert.deepEqual(ok(await request('/api/bootstrap')).organizations.map(o=>o.document_count),[2,2]);
+  assert.deepEqual(base.category_document_counts.map(c=>[c.category_id,c.organization_id,c.document_count]).sort(),[[workA,'kwwa',2],[workA,'upper',1],[workB,'upper',1]].sort());
+  ok(await request('/api/documents?category='+workB+'&title=없는문서'));const searched=ok(await request('/api/bootstrap'));assert.deepEqual(searched.organizations.map(o=>o.document_count),[2,2]);assert.deepEqual(searched.category_document_counts,base.category_document_counts);
  });
  await t.test('선택·형식·미등록 항목·인증이 유효해야 다운로드 가능',async()=>{
   for(const path of ['excel','files','check'])assert.equal((await request('/api/exports/'+path+'?'+scope(),{session:''})).status,401);

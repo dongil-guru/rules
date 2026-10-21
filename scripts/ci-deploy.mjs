@@ -91,6 +91,7 @@ async function diagnoseAdministrator(url){
   if(!response.ok||!body.user?.is_admin||body.user.id!==administrator.id)throw new Error('운영 관리자 세션 검사 실패');
   const bootstrap=await fetch(url+'/api/bootstrap',{headers:{Cookie:session},signal:AbortSignal.timeout(20000)}),base=await bootstrap.json();
   if(!bootstrap.ok||!base.organizations.every(o=>Number.isInteger(o.document_count)&&o.document_count>=0))throw new Error('운영 기관별 문서 건수 검사 실패');
+  if(!Array.isArray(base.category_document_counts)||!base.category_document_counts.every(c=>base.categories.some(category=>category.id===c.category_id)&&base.organizations.some(o=>o.id===c.organization_id)&&Number.isInteger(c.document_count)&&c.document_count>0)||!base.organizations.every(o=>base.category_document_counts.filter(c=>c.organization_id===o.id).reduce((sum,c)=>sum+c.document_count,0)===o.document_count)||!base.categories.every(category=>base.category_document_counts.filter(c=>c.category_id===category.id).reduce((sum,c)=>sum+c.document_count,0)===category.document_count))throw new Error('운영 업무별·기관별 문서 건수 검사 실패');
   const selection=await cf('/d1/database/'+config.d1_databases[0].database_id+'/query','POST',{sql:'SELECT d.organization_id,d.category_id,(SELECT count(*) FROM attachments a JOIN revisions r ON r.id=a.revision_id JOIN documents x ON x.id=r.document_id WHERE x.organization_id=d.organization_id AND x.category_id=d.category_id) file_count FROM documents d LIMIT 1'});
   const sample=selection?.[0]?.results?.[0];
   if(sample){
@@ -108,7 +109,7 @@ async function diagnoseAdministrator(url){
     const reader=file.body.getReader();try{await reader.read();}finally{await reader.cancel();}
    }
   }
-  console.log('운영 기관별 문서 건수·엑셀·최신본 및 전체 이력 첨부파일 다운로드 검사 통과');
+  console.log('운영 전체·업무별 문서 건수·엑셀·최신본 및 전체 이력 첨부파일 다운로드 검사 통과');
  }finally{await fetch(url+'/api/logout',{method:'POST',headers:{Origin:url,Cookie:session},signal:AbortSignal.timeout(20000)});}
  console.log('운영 관리자 비밀번호·로그인·세션 검사 통과');
 }
