@@ -642,7 +642,8 @@ test('등록 화면 순서·첫 업무구분 기본값·명칭·연월 검색 �
  elements.get('#editor-org').value='kwwa';elements.get('#editor-category').value='first-work';
  const document={querySelector:id=>elements.get(id),querySelectorAll:()=>[],addEventListener:(name,fn)=>handlers.set(name,fn),body:{classList:{add(){},remove(){}}}};
  const source=await readFile('public/app.js','utf8');assert.match(source,/\nstart\(\);\s*$/);
- const app=new Function('document','window','fetch','setTimeout','clearTimeout',source.replace(/\nstart\(\);\s*$/,'\nreturn {state,openEditor,listView,queryString,resetSearch,documentList,typeIcon,detailView};'))(document,{addEventListener(){}},async()=>({ok:true,json:async()=>({documents:[],rows:[]})}),()=>0,()=>{});
+ const savedDefaults=new Map(),sessionStorage={getItem:key=>savedDefaults.get(key),setItem:(key,value)=>savedDefaults.set(key,value),removeItem:key=>savedDefaults.delete(key)};
+ const app=new Function('document','window','fetch','setTimeout','clearTimeout','sessionStorage',source.replace(/\nstart\(\);\s*$/,'\nreturn {state,openEditor,listView,queryString,resetSearch,documentList,typeIcon,detailView,rememberRegistration,registrationDefaults,resetEntryDefaults};'))(document,{addEventListener(){}},async()=>({ok:true,json:async()=>({documents:[],rows:[]})}),()=>0,()=>{},sessionStorage);
  app.state.bootstrap={categories:[{id:'first-work',name:'첫 업무',sort_order:0},{id:'other-work',name:'다른 업무',sort_order:1}],stats:{}};
  app.state.category='other-work';app.state.loading=false;app.openEditor('new');
  let html=elements.get('#editor-dialog').innerHTML;
@@ -658,6 +659,16 @@ test('등록 화면 순서·첫 업무구분 기본값·명칭·연월 검색 �
  assert.doesNotMatch(selected(html,'editor-category'),/업무구분 선택/);
  assert.ok(elements.get('#editor-category').focused);
  assert.ok(html.includes('참조 문서번호'));assert.ok(html.includes('<span>설명'));assert.doesNotMatch(html,/참조 결재번호|주요내용/);
+ app.state.user={id:'user-one'};app.rememberRegistration({category_id:'other-work',organization_id:'upper',document_type:'가이드라인',requirement:'필수'});app.openEditor('new');html=elements.get('#editor-dialog').innerHTML;
+ for(const [id,value] of [['editor-category','other-work'],['editor-org','upper'],['editor-document-type','가이드라인'],['editor-requirement','필수']])assert.ok(selected(html,id).includes('<option value="'+value+'" selected>'));
+ // A reload retains defaults for the current signed-in account in this tab.
+ app.state.entryOwner=null;app.state.entryDefaults=null;app.openEditor('new');assert.ok(selected(elements.get('#editor-dialog').innerHTML,'editor-category').includes('value="other-work" selected'));
+ const categoryList=app.state.bootstrap.categories;app.state.bootstrap.categories=categoryList.slice(0,1);app.openEditor('new');assert.ok(selected(elements.get('#editor-dialog').innerHTML,'editor-category').includes('value="first-work" selected'));app.state.bootstrap.categories=categoryList;
+ // Another account and a new sign-in cannot inherit the previous entry.
+ app.state.user={id:'user-two'};app.openEditor('new');assert.ok(selected(elements.get('#editor-dialog').innerHTML,'editor-org').includes('value="kwwa" selected'));
+ app.state.user={id:'user-one'};app.resetEntryDefaults();app.openEditor('new');html=elements.get('#editor-dialog').innerHTML;
+ for(const [id,value] of [['editor-category','first-work'],['editor-org','kwwa'],['editor-document-type','지침'],['editor-requirement','권장']])assert.ok(selected(html,id).includes('<option value="'+value+'" selected>'));
+
  const revision={id:'existing-revision',sequence:1,title:'기존 문서',revision_date:'2026-01-30',manager:'담당',approval_no:'문서1',summary:'설명',token:'token',attachments:[]};
  app.state.detail={document:{id:'existing-document',organization_id:'upper',category_id:'other-work',document_type:'매뉴얼',requirement:'필수'},revisions:[revision],related_document_id:null};
  app.openEditor('append',null,'existing-document');html=elements.get('#editor-dialog').innerHTML;
@@ -679,7 +690,7 @@ test('등록 화면 순서·첫 업무구분 기본값·명칭·연월 검색 �
   {...revision,id:id+'-old',title:'과거 문서',sequence:2,display_sequence:1,revision_date:'2020-01-01'}
  ],related_document_id:id==='kwwa'?'upper':'kwwa'});
  const kwwa=history('kwwa','매뉴얼'),upper=history('upper','가이드라인');app.state.detail={...kwwa,columns:{kwwa,upper}};
- html=app.detailView();assert.deepEqual([...html.matchAll(/<span class="badge (?:revised|enacted)">([^<]+)</g)].map(m=>m[1]),['2차 개정','1차 개정','제정','2차 개정','1차 개정','제정']);
+ html=app.detailView();assert.doesNotMatch(html,/class="badge (?:revised|enacted)"/);assert.equal((html.match(/class="revision-top"><div><time class="revision-date"/g)||[]).length,6);
  assert.equal((html.match(/class="badge latest"/g)||[]).length,2);assert.equal((html.match(/aria-label="문서종류: 매뉴얼"/g)||[]).length,4);assert.equal((html.match(/aria-label="문서종류: 가이드라인"/g)||[]).length,4);
  assert.equal((html.match(/<h4 class="revision-title"><span class="document-type-icon/g)||[]).length,6);assert.ok(html.includes('최신 &lt;문서&gt;'));assert.equal((html.match(/<time class="revision-date"/g)||[]).length,6);
  app.state.search={title:'',manager:'',year:'2026',month:'2'};html=app.listView();
@@ -692,7 +703,7 @@ test('등록 화면 순서·첫 업무구분 기본값·명칭·연월 검색 �
  const css=await readFile('public/styles.css','utf8'),rule=selector=>css.slice(css.indexOf(selector+'{')+selector.length+1).split('}')[0];
  const font=body=>body.match(/font-size:([^;]+)/)?.[1],headerFont=font(rule('.paired-document-table thead th'));
  assert.ok(headerFont);assert.equal(font(rule('.paired-document-table thead tr:last-child th'))||headerFont,headerFont);
- const primaryColor=css.match(/button\.primary,\.primary\{background:([^;]+)/)?.[1];assert.ok(primaryColor);assert.equal(rule('.revision-meta .revision-date').match(/color:([^;]+)/)?.[1],primaryColor);
+ const primaryColor=css.match(/button\.primary,\.primary\{background:([^;]+)/)?.[1];assert.ok(primaryColor);assert.equal(rule('.revision-top .revision-date').match(/color:([^;]+)/)?.[1],primaryColor);
  await new Promise(setImmediate);
 });
 

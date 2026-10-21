@@ -1,4 +1,5 @@
 import { normalizeIp, clientIp, networkAllowed, deniedResponse } from './access-control.mjs';
+import { exportDocuments } from './exports.mjs';
 
 const MAX_FILE = 20 * 1024 * 1024;
 const MAX_TOTAL = 40 * 1024 * 1024;
@@ -97,7 +98,7 @@ async function login(request, env) {
 }
 async function bootstrap(env,user) {
   const results = await env.DB.batch([
-    stmt(env,'SELECT * FROM organizations ORDER BY name COLLATE NOCASE'),
+    stmt(env,'SELECT o.*,(SELECT count(*) FROM documents d WHERE d.organization_id=o.id) document_count FROM organizations o ORDER BY o.name COLLATE NOCASE'),
     stmt(env,'SELECT c.*,(SELECT count(*) FROM documents d WHERE d.category_id=c.id) document_count FROM work_categories c ORDER BY c.sort_order,c.id'),
     stmt(env,`SELECT (SELECT count(*) FROM documents) documents, (SELECT count(*) FROM revisions) revisions, (SELECT count(*) FROM organizations) organizations, (SELECT count(DISTINCT document_id) FROM revisions WHERE updated_at>=?) recent`,new Date(Date.now()-30*86400000).toISOString())
   ]);
@@ -390,7 +391,7 @@ async function download(env,id) {
 }
 async function route(request,env,ctx) {
   const url=new URL(request.url),path=url.pathname,method=request.method;
-  const publicAsset=['/app.js','/styles.css','/favicon.svg'].includes(path);
+  const publicAsset=['/app.js','/styles.css','/favicon.svg','/archive.mjs'].includes(path);
   if(path!=='/api/health'&&!publicAsset&&env.DB&&!await networkAllowed(request,env.DB))return deniedResponse(request);
   if(!path.startsWith('/api/')){
     if(!['GET','HEAD'].includes(method))fail(405,'허용되지 않는 요청입니다.');
@@ -400,7 +401,7 @@ async function route(request,env,ctx) {
   if(!['GET','HEAD'].includes(method)&&request.headers.get('Origin')!==url.origin)fail(403,'같은 사이트에서만 변경할 수 있습니다. 페이지를 새로고침해 주세요.');
   if(path==='/api/session'&&method==='GET'){const user=await authorized(request,env);return json({authenticated:!!user,user,configured:configReady(env),username:env.ADMIN_USER||'admin',client_ip:clientIp(request)});}
   if(path==='/api/login'&&method==='POST')return login(request,env);
-  if(path==='/api/health'&&method==='GET'){if(configReady(env))await ensureAdministrator(env);return json({ready:configReady(env)&&!!await first(env,'SELECT id FROM users WHERE is_admin=1 AND active=1'),account_management:true,login_attempt_limit:false,ip_access_control:true});}
+  if(path==='/api/health'&&method==='GET'){if(configReady(env))await ensureAdministrator(env);return json({ready:configReady(env)&&!!await first(env,'SELECT id FROM users WHERE is_admin=1 AND active=1'),account_management:true,login_attempt_limit:false,ip_access_control:true,bulk_downloads:true});}
   const user=await authorized(request,env);
   if(!user)fail(401,'로그인이 필요합니다. 다시 로그인해 주세요.');
   if(path==='/api/logout'&&method==='POST'){await stmt(env,'DELETE FROM user_sessions WHERE token_hash=?',await digest(cookieValue(request))).run();return json({ok:true},200,{'Set-Cookie':sessionCookie(request,'',0)});}
@@ -415,6 +416,8 @@ async function route(request,env,ctx) {
   const account=path.match(/^\/api\/users\/([\w-]+)$/);
   if(account){requireAdministrator(user);if(['PUT','DELETE'].includes(method))return mutateUser(request,env,user,account[1]);fail(405,'허용되지 않는 요청입니다.');}
   if(path==='/api/bootstrap'&&method==='GET')return bootstrap(env,user);
+  const exportRoute=path.match(/^\/api\/exports\/(check|excel|files)$/);
+  if(exportRoute&&method==='GET')return exportDocuments(url,env,exportRoute[1]);
   if(path==='/api/categories/order'&&method==='PUT')return reorderCategories(request,env);
   const category=path.match(/^\/api\/(organizations|categories)(?:\/([\w-]+))?$/);
   if(category&&['POST','PUT','DELETE'].includes(method)){if(category[1]==='organizations')fail(405,'기관 구분은 한국상하수도협회와 상위기관으로 고정되어 있습니다.');if((method==='POST'&&category[2])||(method!=='POST'&&!category[2]))fail(405,'허용되지 않는 요청입니다.');return categoryMutation(request,env,category[2]);}

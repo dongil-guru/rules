@@ -50,15 +50,16 @@ async function verify(url){
  for(let attempt=0;attempt<6;attempt++){
   try{
    const response=await fetch(url+'/api/health',{signal:AbortSignal.timeout(20000)}),health=await response.json();
-   if(response.ok&&health.ready&&health.account_management&&health.login_attempt_limit===false&&health.ip_access_control){
+   if(response.ok&&health.ready&&health.account_management&&health.login_attempt_limit===false&&health.ip_access_control&&health.bulk_downloads){
     // Passwords and login IDs can now change in the site. Verify storage through
     // the existing deployment credential without resetting any user credentials.
     const query=await cf('/d1/database/'+config.d1_databases[0].database_id+'/query','POST',{sql:"SELECT (SELECT count(*) FROM users WHERE is_admin=1 AND active=1 AND length(password_hash)>0) administrator_count,(SELECT count(*) FROM documents WHERE document_type NOT IN ('지침','매뉴얼','가이드라인','기타')) invalid_document_types,(SELECT count(*) FROM documents WHERE requirement NOT IN ('권장','필수')) invalid_requirements,(SELECT mode FROM access_settings WHERE id=1) access_mode,(SELECT count(*) FROM pragma_table_info('work_categories') WHERE name='parent_id') legacy_category_columns,(SELECT count(*) FROM pragma_table_info('work_categories') WHERE name='sort_order') category_order_columns,(SELECT count(*) FROM user_sessions s LEFT JOIN users u ON u.id=s.user_id WHERE u.id IS NULL) invalid_sessions"});
     const row=query?.[0]?.results?.[0];
     if(!row||row.administrator_count!==1||row.invalid_document_types!==0||row.invalid_requirements!==0||!['all','allowlist'].includes(row.access_mode)||row.legacy_category_columns!==0||row.category_order_columns!==1||row.invalid_sessions!==0)throw new Error('운영 데이터 구조 검사 실패');
-    for(const asset of ['/app.js','/styles.css','/index.html']){
+    for(const asset of ['/app.js','/styles.css','/archive.mjs','/index.html']){
      const frontend=await fetch(url+asset,{cache:'no-store',signal:AbortSignal.timeout(20000)});
      const body=await frontend.text();
+     if(asset==='/archive.mjs'&&!frontend.headers.get('Content-Type')?.includes('javascript'))throw new Error('ZIP 모듈 콘텐츠 형식 확인 필요');
      if(asset==='/index.html'&&row.access_mode==='allowlist'&&frontend.status===403&&body.includes('data-ip-access-denied'))continue;
      if(!frontend.ok||body!==readFileSync('public'+asset,'utf8'))throw new Error('최신 화면 파일 배포 확인 필요: '+asset);
     }
@@ -88,6 +89,23 @@ async function diagnoseAdministrator(url){
  try{
   const response=await fetch(url+'/api/me',{headers:{Cookie:session},signal:AbortSignal.timeout(20000)}),body=await response.json();
   if(!response.ok||!body.user?.is_admin||body.user.id!==administrator.id)throw new Error('운영 관리자 세션 검사 실패');
+  const bootstrap=await fetch(url+'/api/bootstrap',{headers:{Cookie:session},signal:AbortSignal.timeout(20000)}),base=await bootstrap.json();
+  if(!bootstrap.ok||!base.organizations.every(o=>Number.isInteger(o.document_count)&&o.document_count>=0))throw new Error('운영 기관별 문서 건수 검사 실패');
+  const selection=await cf('/d1/database/'+config.d1_databases[0].database_id+'/query','POST',{sql:'SELECT d.organization_id,d.category_id,(SELECT count(*) FROM attachments a JOIN revisions r ON r.id=a.revision_id JOIN documents x ON x.id=r.document_id WHERE x.organization_id=d.organization_id AND x.category_id=d.category_id) file_count FROM documents d LIMIT 1'});
+  const sample=selection?.[0]?.results?.[0];
+  if(sample){
+   const scope=new URLSearchParams({organization:sample.organization_id,category:sample.category_id});
+   const excel=await fetch(url+'/api/exports/excel?'+scope,{headers:{Cookie:session},signal:AbortSignal.timeout(30000)}),bytes=new Uint8Array(await excel.arrayBuffer());
+   if(!excel.ok||!excel.headers.get('Content-Type')?.includes('spreadsheetml')||bytes[0]!==80||bytes[1]!==75)throw new Error('운영 엑셀 다운로드 검사 실패');
+   if(sample.file_count>0){
+    const response=await fetch(url+'/api/exports/files?'+scope,{headers:{Cookie:session},signal:AbortSignal.timeout(30000)}),manifest=await response.json();
+    if(!response.ok||!manifest.files?.length||!manifest.documents?.length)throw new Error('운영 첨부파일 다운로드 목록 검사 실패');
+    const file=await fetch(url+'/api/files/'+manifest.files[0].id,{headers:{Cookie:session},signal:AbortSignal.timeout(30000)});
+    if(!file.ok||!file.headers.get('Content-Type')?.includes('application/octet-stream'))throw new Error('운영 첨부파일 다운로드 검사 실패');
+    const reader=file.body.getReader();try{await reader.read();}finally{await reader.cancel();}
+   }
+  }
+  console.log('운영 기관별 문서 건수·엑셀 및 첨부파일 다운로드 검사 통과');
  }finally{await fetch(url+'/api/logout',{method:'POST',headers:{Origin:url,Cookie:session},signal:AbortSignal.timeout(20000)});}
  console.log('운영 관리자 비밀번호·로그인·세션 검사 통과');
 }

@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "check": "node --check src/worker.js && node --check src/access-control.mjs && node --check public/app.js && node --check scripts/ci-deploy.mjs && node --check scripts/admin-credentials.mjs",
-    "test": "node --test test/integration.test.mjs",
+    "check": "node --check src/worker.js && node --check src/access-control.mjs && node --check public/archive.mjs && node --check src/spreadsheet.mjs && node --check src/exports.mjs && node --check public/app.js && node --check scripts/ci-deploy.mjs && node --check scripts/admin-credentials.mjs",
+    "test": "node --test test/*.test.mjs",
     "build": "node scripts/build.mjs",
     "deploy": "wrangler deploy",
     "db:migrate": "wrangler d1 migrations apply DB --remote",
