@@ -246,16 +246,26 @@ input[type=radio]{width:17px;height:17px;min-height:17px;accent-color:#147d71;fl
 .download-options{margin:0 0 16px;padding:0;border:0;min-width:0}.download-options legend{font-size:16.8px;font-weight:600;color:#4d6772;margin-bottom:9px}
 .download-check{display:flex;align-items:flex-start;gap:8px;font-size:15.4px;line-height:1.6;color:#5c7581;overflow-wrap:anywhere}
 .download-check input{flex:none;width:17px;height:17px;min-height:17px;padding:0;margin:3px 0 0;accent-color:#147d71}
-.download-check-all{font-weight:600;margin-bottom:8px}.download-check-list{display:flex;flex-wrap:wrap;gap:7px 16px;max-height:146px;overflow:auto;padding:2px}
-.download-actions{display:flex;gap:9px;flex-wrap:wrap;margin:19px 0 12px}.download-actions .btn{font-size:15.4px;padding:9px 11px;gap:7px}
+.download-check-list{display:flex;flex-wrap:wrap;gap:7px 16px;max-height:146px;overflow:auto;padding:2px}
+.download-actions{display:flex;justify-content:flex-end;gap:9px;flex-wrap:wrap;margin:19px 0 12px}.download-actions .btn{font-size:15.4px;padding:9px 11px;gap:7px}
 .download-progress,.download-error{font-size:14px;line-height:1.7;margin:8px 0 0}.download-progress{color:#147d71}.download-error{color:#b45353}
 .paired-document-table{min-width:1044px}.paired-document-table .connector-col{width:44px}
 .paired-document-table .pair-connector-cell{padding:0;border-right:0;background:#fff}
 .paired-document-table .connector-heading{padding:0;background:#edf5f2}
-.paired-document-table tr.paired-row-linked>td{background:#f5faf8}
+/* The category order assigns a consistent pale color, including empty rows. */
+.category-tone-0{--category-tint:#f1f8f5;--category-label:#e5f2eb}
+.category-tone-1{--category-tint:#f0f5fc;--category-label:#e4edf9}
+.category-tone-2{--category-tint:#fff8ec;--category-label:#fbefd9}
+.category-tone-3{--category-tint:#f7f2fb;--category-label:#eee4f6}
+.category-tone-4{--category-tint:#fdf2f2;--category-label:#f7e5e6}
+.category-tone-5{--category-tint:#eff8f9;--category-label:#e0f0f2}
+.paired-document-table .category-group td{background:var(--category-tint)}
+.paired-document-table .category-group .business-cell{background:var(--category-label)}
 .pair-connector{display:block;position:relative;height:2px;background:#147d71;width:100%;min-width:30px}
 .pair-connector::before,.pair-connector::after{content:'';position:absolute;top:-3px;width:8px;height:8px;background:#fff;border:2px solid #147d71;border-radius:50%}
 .pair-connector::before{left:0}.pair-connector::after{right:0}
 .revision-top .revision-date{color:#147d71;font-size:18.2px;font-weight:650;margin-right:10px;white-space:nowrap}
 @media(max-width:1100px){.search-download-grid{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px}.download-panel{padding-left:20px}.search-download-grid .search-form{grid-template-columns:minmax(0,1fr)}}
 @media(max-width:760px){.search-download-grid{grid-template-columns:minmax(0,1fr);gap:22px}.download-panel{border-left:0;border-top:1px solid #dce6e2;padding:22px 0 0}.download-check-list{max-height:160px}}
+
+.login-copy h1{word-break:keep-all}

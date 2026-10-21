@@ -24,8 +24,11 @@ async function exportData(url,env){
 }
 export async function exportDocuments(url,env,kind){
  const format=kind==='check'?url.searchParams.get('format'):kind;if(!['excel','files'].includes(format))fail(400,'다운로드 형식을 선택해 주세요.');
- const {documents,files}=await exportData(url,env);
- if(format==='files'&&!files.length)fail(404,'선택한 문서에 첨부파일이 없습니다. 엑셀 다운로드는 이용할 수 있습니다.');
+ const versions=format==='files'?(url.searchParams.get('versions')??'latest'):'all';
+ if(!['latest','all'].includes(versions))fail(400,'첨부파일 범위를 확인해 주세요.');
+ const {documents,files:allFiles}=await exportData(url,env),latestIds=new Set(documents.map(d=>d.revision_id));
+ const files=versions==='latest'?allFiles.filter(file=>latestIds.has(file.revision_id)):allFiles;
+ if(format==='files'&&!files.length)fail(404,versions==='latest'?'선택한 문서의 최신본에 첨부파일이 없습니다. 이전버전까지 포함을 선택하거나 엑셀 다운로드를 이용해 주세요.':'선택한 문서에 첨부파일이 없습니다. 엑셀 다운로드는 이용할 수 있습니다.');
  if(kind==='files')return new Response(JSON.stringify({documents:documents.map(d=>({id:d.id,title:d.title})),files:files.map(a=>({id:a.id,document_id:a.document_id,revision_id:a.revision_id,revision_date:a.revision_date,name:a.name,size:a.size,created_at:a.created_at}))}),{headers:{'Content-Type':'application/json; charset=utf-8'}});
  if(kind==='check')return new Response(JSON.stringify({document_count:documents.length,attachment_count:files.length,total_bytes:files.reduce((s,a)=>s+a.size,0)}),{headers:{'Content-Type':'application/json; charset=utf-8'}});
  const name=`안전정보팀_문서목록_${today()}.xlsx`;

@@ -98,14 +98,17 @@ async function diagnoseAdministrator(url){
    const excel=await fetch(url+'/api/exports/excel?'+scope,{headers:{Cookie:session},signal:AbortSignal.timeout(30000)}),bytes=new Uint8Array(await excel.arrayBuffer());
    if(!excel.ok||!excel.headers.get('Content-Type')?.includes('spreadsheetml')||bytes[0]!==80||bytes[1]!==75)throw new Error('운영 엑셀 다운로드 검사 실패');
    if(sample.file_count>0){
-    const response=await fetch(url+'/api/exports/files?'+scope,{headers:{Cookie:session},signal:AbortSignal.timeout(30000)}),manifest=await response.json();
+    const response=await fetch(url+'/api/exports/files?'+scope+'&versions=all',{headers:{Cookie:session},signal:AbortSignal.timeout(30000)}),manifest=await response.json();
     if(!response.ok||!manifest.files?.length||!manifest.documents?.length)throw new Error('운영 첨부파일 다운로드 목록 검사 실패');
+    const latestResponse=await fetch(url+'/api/exports/files?'+scope+'&versions=latest',{headers:{Cookie:session},signal:AbortSignal.timeout(30000)}),latestManifest=await latestResponse.json();
+    if(latestResponse.status===404){if(!latestManifest.error?.includes('최신본에 첨부파일이 없습니다'))throw new Error('운영 최신 첨부파일 없음 안내 검사 실패');}
+    else if(!latestResponse.ok||!latestManifest.files?.length||!latestManifest.files.every(f=>manifest.files.some(a=>a.id===f.id)))throw new Error('운영 최신본 첨부파일 범위 검사 실패');
     const file=await fetch(url+'/api/files/'+manifest.files[0].id,{headers:{Cookie:session},signal:AbortSignal.timeout(30000)});
     if(!file.ok||!file.headers.get('Content-Type')?.includes('application/octet-stream'))throw new Error('운영 첨부파일 다운로드 검사 실패');
     const reader=file.body.getReader();try{await reader.read();}finally{await reader.cancel();}
    }
   }
-  console.log('운영 기관별 문서 건수·엑셀 및 첨부파일 다운로드 검사 통과');
+  console.log('운영 기관별 문서 건수·엑셀·최신본 및 전체 이력 첨부파일 다운로드 검사 통과');
  }finally{await fetch(url+'/api/logout',{method:'POST',headers:{Origin:url,Cookie:session},signal:AbortSignal.timeout(20000)});}
  console.log('운영 관리자 비밀번호·로그인·세션 검사 통과');
 }

@@ -76,6 +76,7 @@ test('다운로드 API의 최신 이력·선택 범위·전체 첨부 보존·�
   for(const path of ['excel','files','check'])assert.equal((await request('/api/exports/'+path+'?'+scope(),{session:''})).status,401);
   for(const query of ['', 'organization=kwwa','category='+workA,'organization=wrong&category='+workA,'organization=kwwa&category=unknown',"organization=kwwa&category=x%27%20OR%201=1"]){assert.equal((await request('/api/exports/excel?'+query)).status,400);}
   assert.equal((await request('/api/exports/check?format=bad&'+scope())).status,400);
+  for(const path of ['files?','check?format=files&'])assert.equal((await request('/api/exports/'+path+scope()+'&versions=invalid')).status,400);
   const empty=ok(await request('/api/categories',{method:'POST',data:{name:'빈 업무'}}),201).id;assert.equal((await request('/api/exports/excel?'+scope(['kwwa'],[empty]))).status,404);
  });
  await t.test('엑셀은 날짜 기준 최신 이력과 입력한 전체 정보·최신 첨부·연결 문서를 포함',async()=>{
@@ -83,14 +84,30 @@ test('다운로드 API의 최신 이력·선택 범위·전체 첨부 보존·�
   const {rows}=spreadsheetRows(response.body);assert.equal(rows.length,3);assert.deepEqual(rows[0],['업무구분','기관구분','문서종류','필수여부','문서명','제·개정 일자','담당자','참조 문서번호','설명','첨부파일','연관문서']);
   const row=rows.find(r=>r[9].includes('계획.pdf'));assert.deepEqual(row.slice(0,9),['개인정보','한국상하수도협회','기타','필수','=안전 / 지침','2026-10-21','<담당>&','안전-001','첫 줄\n둘째 줄']);
   assert.equal(row[9].split('\n').length,3);assert.equal(row[9].split('\n').filter(x=>x==='계획.pdf').length,2);assert.ok(row[9].includes('자료.xlsx'));assert.ok(!row[9].includes('과거.hwp'));assert.equal(row[10],'상위기관\n상위 지침\n2026-06-01');
-  const all=spreadsheetRows(ok(await request('/api/exports/excel?'+scope(['kwwa','upper'],[workA,workB])))).rows;assert.equal(all.length,5);assert.ok(all.some(r=>r[4]==='같은 날 나중'));assert.ok(!all.some(r=>r[4]==='같은 날 먼저'));
+  const all=spreadsheetRows(ok(await request('/api/exports/excel?'+scope(['kwwa','upper'],[workA,workB])+'&versions=all'))).rows;assert.equal(all.length,5);assert.ok(all.some(r=>r[4]==='같은 날 나중'));assert.ok(!all.some(r=>r[4]==='같은 날 먼저'));
+ });
+ await t.test('첨부는 기본 최신본만 포함하고 등록 순서보다 제개정 날짜·동일 날짜 최신 이력을 우선',async()=>{
+  const manifest=ok(await request('/api/exports/files?'+scope()));assert.equal(manifest.files.length,3);assert.ok(manifest.files.every(f=>f.revision_id===doc.revision_id));assert.ok(!manifest.files.some(f=>f.name==='과거.hwp'));
+  const explicit=ok(await request('/api/exports/files?'+scope()+'&versions=latest'));assert.deepEqual(explicit.files.map(f=>f.id),manifest.files.map(f=>f.id));
+  const zip=unzip(await clientArchive(manifest));assert.ok(![...zip.keys()].some(name=>name.includes('2020-01-01')));assert.equal([...zip.keys()].filter(name=>!name.endsWith('/')).length,3);
+  const info=ok(await request('/api/exports/check?format=files&'+scope()));assert.equal(info.attachment_count,3);assert.equal(info.total_bytes,manifest.files.reduce((total,file)=>total+file.size,0));
+  const sameDate=ok(await request('/api/exports/files?'+scope(['upper'],[workB])));assert.deepEqual(sameDate.files.map(f=>f.name),['최근.txt']);
+  assert.deepEqual(ok(await request('/api/exports/files?'+scope(['upper'],[workB])+'&versions=all')).files.map(f=>f.name),['최근.txt','이전.txt']);
  });
  await t.test('ZIP은 문서별 폴더 안에 전체 이력의 파일을 원본 바이트 그대로 포함',async()=>{
-  const response=await request('/api/exports/files?'+scope());ok(response);assert.match(response.headers.get('Content-Type'),/application\/json/);assert.ok(!JSON.stringify(response.body).includes('storage_key'));const zip=unzip(await clientArchive(response.body)),names=[...zip.keys()];
+  const response=await request('/api/exports/files?'+scope()+'&versions=all');ok(response);assert.match(response.headers.get('Content-Type'),/application\/json/);assert.ok(!JSON.stringify(response.body).includes('storage_key'));const zip=unzip(await clientArchive(response.body)),names=[...zip.keys()];
   assert.ok(names.includes('=안전 _ 지침/'));assert.ok(names.includes('=안전 _ 지침 (2)/'));const history=names.find(n=>n.endsWith('/2020-01-01/과거.hwp'));assert.ok(history);const root=history.split('/')[0];
   const bodies=[...zip.entries()].filter(([name])=>!name.endsWith('/')).map(([,data])=>data.toString()).sort();assert.deepEqual(bodies,['first binary\0','second body','third body','history body'].sort());
   assert.ok(names.includes(root+'/2026-10-21/계획 (2).pdf'));assert.ok(!names.some(n=>n.includes('상위.pdf')));assert.ok(!names.some(n=>n.split('/').includes('..')));
-  const info=ok(await request('/api/exports/check?format=files&'+scope()));assert.equal(info.document_count,2);assert.equal(info.attachment_count,4);assert.ok(info.total_bytes>0);assert.ok(!JSON.stringify(info).includes('storage_key'));
+  const info=ok(await request('/api/exports/check?format=files&'+scope()+'&versions=all'));assert.equal(info.document_count,2);assert.equal(info.attachment_count,4);assert.ok(info.total_bytes>0);assert.ok(!JSON.stringify(info).includes('storage_key'));
+ });
+ await t.test('최신본에 파일이 없으면 이전 첨부로 대체하지 않고 이전버전 포함 선택을 안내',async()=>{
+  const archived=await create(fields('kwwa',workB,'이전 첨부만 있는 문서',{revision_date:'2020-01-01'}),[['이전.hwp','archived only']]);
+  ok(await request('/api/documents/'+archived.document_id+'/revisions',{method:'POST',data:fields('kwwa',workB,'최신 첨부 없는 문서',{revision_date:'2026-10-21'}),files:[]}),201);
+  const response=await request('/api/exports/files?'+scope(['kwwa'],[workB]));assert.equal(response.status,404);assert.match(response.body.error,/최신본.*첨부파일이 없습니다.*이전버전까지 포함/);
+  assert.equal((await request('/api/exports/check?format=files&'+scope(['kwwa'],[workB])+'&versions=latest')).status,404);
+  const all=ok(await request('/api/exports/files?'+scope(['kwwa'],[workB])+'&versions=all'));assert.equal(all.files.length,1);assert.equal(all.files[0].name,'이전.hwp');
+  const rows=spreadsheetRows(ok(await request('/api/exports/excel?'+scope(['kwwa'],[workB])+'&versions=all'))).rows;assert.equal(rows[1][4],'최신 첨부 없는 문서');assert.equal(rows[1][9],'');
  });
  await t.test('파일이 없거나 R2와 메타데이터가 달라지면 손상 ZIP을 만들지 않음',async()=>{
   const noFile=await create(fields('kwwa',workB,'첨부 없는 문서'));assert.equal((await request('/api/exports/files?'+scope(['kwwa'],[workB]))).status,404);assert.equal((await request('/api/exports/excel?'+scope(['kwwa'],[workB]))).status,200);
